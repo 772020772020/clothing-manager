@@ -16,7 +16,8 @@ from calculations import calc_item, payment_status, remaining_balance
 # ============================================================
 #  إعداد الصفحة + RTL
 # ============================================================
-st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵", layout="wide")
+st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -27,6 +28,14 @@ st.markdown("""
     [data-testid="stMetricValue"] { direction: ltr; text-align: center; }
     [data-testid="stMetricLabel"] { justify-content: center; }
     .stButton button { width: 100%; }
+    /* تحسين العرض على الموبايل */
+    @media (max-width: 640px) {
+        [data-testid="stMetricValue"] { font-size: 1.4rem; }
+        h1 { font-size: 1.5rem; }
+        h2 { font-size: 1.3rem; }
+        h3 { font-size: 1.1rem; }
+        .block-container { padding-top: 2.5rem; padding-left: 1rem; padding-right: 1rem; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
