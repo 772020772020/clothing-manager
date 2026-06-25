@@ -441,13 +441,36 @@ def view_reports():
         } for r in rows])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # الدخول على عميل لعرض قطعه
-        st.markdown("##### عرض تفاصيل عميل")
+        # 🔍 بحث باسم العميل وعرض كل بياناته
+        st.divider()
+        st.markdown("##### 🔍 بحث عن عميل بالاسم")
+        search = st.text_input("اكتب اسم العميل (أو جزء منه)", key="cust_search")
         custs = db.customers_list()
-        if custs:
-            chosen_cust = st.selectbox("اختر العميل", custs, key="rep_cust")
+        if search.strip():
+            matches = [c for c in custs if search.strip().lower() in c.lower()]
+        else:
+            matches = custs
+
+        if not custs:
+            st.info("لا يوجد عملاء بعد.")
+        elif not matches:
+            st.warning("لا يوجد عميل بهذا الاسم.")
+        else:
+            chosen_cust = st.selectbox("اختر العميل", matches, key="rep_cust")
             if chosen_cust:
                 citems = db.items_of_customer(chosen_cust)
+                # ملخص العميل
+                tot_sales = sum(it["selling_price_egp"] or 0 for it in citems)
+                tot_dep = sum(it["deposit_paid"] or 0 for it in citems)
+                tot_bal = tot_sales - tot_dep
+                tot_profit = sum((it["profit_egp"] or 0) for it in citems if it["weight_grams"] > 0)
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("عدد القطع", len(citems))
+                m2.metric("إجمالي البيع", egp(tot_sales))
+                m3.metric("المدفوع (عربون)", egp(tot_dep))
+                m4.metric("المتبقي عليه", egp(tot_bal))
+                m5.metric("صافي الربح", egp(tot_profit))
+
                 cdata = []
                 for it in citems:
                     profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
@@ -457,12 +480,11 @@ def view_reports():
                         "سعر البيع": egp(it["selling_price_egp"]),
                         "الوزن (جم)": f'{it["weight_grams"]:g}',
                         "العربون": egp(it["deposit_paid"]),
+                        "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
                         "الحالة": STATUS_AR.get(it["status"], it["status"]),
                         "الربح": profit,
                     })
                 st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
-        else:
-            st.info("لا يوجد عملاء بعد.")
 
     with tab3:
         st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
