@@ -106,7 +106,14 @@ class Database:
         return self._exec("SELECT * FROM orders WHERE id=%s", (oid,), fetch="one")
 
     def all_orders(self):
-        return self._exec("SELECT * FROM orders ORDER BY order_date::date DESC, id DESC", fetch="all")
+        # ترتيب بالرقم تنازلياً (الأكبر فوق)؛ لو الرقم مش رقمي يترتب نصياً في الآخر
+        return self._exec("""
+            SELECT * FROM orders
+            ORDER BY
+                CASE WHEN order_number ~ '^[0-9]+$' THEN 0 ELSE 1 END,
+                CASE WHEN order_number ~ '^[0-9]+$' THEN CAST(order_number AS BIGINT) ELSE NULL END DESC,
+                order_number DESC
+        """, fetch="all")
 
     def order_summary(self, oid):
         return self._exec("""
