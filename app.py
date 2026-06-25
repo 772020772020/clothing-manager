@@ -28,6 +28,9 @@ st.markdown("""
     [data-testid="stMetricValue"] { direction: ltr; text-align: center; }
     [data-testid="stMetricLabel"] { justify-content: center; }
     .stButton button { width: 100%; }
+    /* منع نص القايمة الجانبية من الانعصار رأسياً */
+    section[data-testid="stSidebar"] { min-width: 230px !important; }
+    section[data-testid="stSidebar"] * { white-space: normal; word-break: keep-all; }
     /* تحسين العرض على الموبايل */
     @media (max-width: 640px) {
         [data-testid="stMetricValue"] { font-size: 1.4rem; }
@@ -81,8 +84,7 @@ def go(view, order_id=None):
 #  الشريط الجانبي
 # ============================================================
 with st.sidebar:
-    st.title("🧵 إدارة الملابس")
-    st.caption("النسخة الويب")
+    st.markdown("### 🧵 إدارة الملابس")
     st.divider()
     if st.button("📊 لوحة المعلومات", use_container_width=True):
         go("dashboard"); rerun()
@@ -91,7 +93,7 @@ with st.sidebar:
     if st.button("📈 التقارير", use_container_width=True):
         go("reports"); rerun()
     st.divider()
-    st.caption("الإصدار 1.0 — ويب")
+    st.caption("الإصدار 1.0")
 
 
 # ============================================================
