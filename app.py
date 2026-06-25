@@ -120,6 +120,56 @@ if nav3.button("📈 التقارير", use_container_width=True):
 st.divider()
 
 
+def _render_customer_search(key_prefix):
+    """خانة بحث باسم العميل + ملخصه وكل قطعه. تُستخدم في أكثر من صفحة."""
+    search = st.text_input("اكتب اسم العميل (أو جزء منه)", key=f"{key_prefix}_search")
+    custs = db.customers_list()
+    if search.strip():
+        matches = [c for c in custs if search.strip().lower() in c.lower()]
+    else:
+        matches = custs
+
+    if not custs:
+        st.info("لا يوجد عملاء بعد.")
+        return
+    if not matches:
+        st.warning("لا يوجد عميل بهذا الاسم.")
+        return
+
+    chosen_cust = st.selectbox("اختر العميل", matches, key=f"{key_prefix}_cust")
+    if not chosen_cust:
+        return
+    citems = db.items_of_customer(chosen_cust)
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in citems)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in citems)
+    tot_bal = tot_sales - tot_dep
+    tot_yuan = sum(it["purchase_price_yuan"] or 0 for it in citems)
+    tot_profit = sum((it["profit_egp"] or 0) for it in citems if it["weight_grams"] > 0)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("عدد القطع", len(citems))
+    m2.metric("إجمالي البيع", egp(tot_sales))
+    m3.metric("المدفوع (عربون)", egp(tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_bal))
+    m5.metric("صافي الربح", egp(tot_profit))
+    st.caption(f"إجمالي الشراء باليوان لكل قطعه: {tot_yuan:g} يوان")
+
+    cdata = []
+    for it in citems:
+        profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
+        cdata.append({
+            "رقم الأوردر": it["order_number"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
+            "الوزن (جم)": f'{it["weight_grams"]:g}',
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": STATUS_AR.get(it["status"], it["status"]),
+            "الربح": profit,
+        })
+    st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+
+
 # ============================================================
 #  لوحة المعلومات
 # ============================================================
@@ -164,6 +214,7 @@ def view_dashboard():
                 "أوردر": it["order_number"],
                 "العميل": it["customer_name"],
                 "المنتج": it["product_name"],
+                "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
                 "الوزن (جم)": f'{it["weight_grams"]:g}',
                 "سعر البيع": egp(it["selling_price_egp"]),
                 "الربح": profit,
@@ -186,6 +237,11 @@ def view_dashboard():
     else:
         st.info("لا توجد قطع في هذه الحالة.")
 
+    st.divider()
+    st.subheader("👤 بحث عن عميل")
+    _render_customer_search("dash")
+
+    st.divider()
     st.subheader("آخر الأوردرات")
     rows = db.all_orders()[:10]
     if rows:
@@ -435,7 +491,9 @@ def view_reports():
     with tab2:
         rows = db.report_by_customer()
         df = pd.DataFrame([{
-            "اسم العميل": r["customer_name"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "اسم العميل": r["customer_name"], "عدد القطع": r["pieces"],
+            "إجمالي الشراء (يوان)": round(r["yuan_total"], 2),
+            "المبيعات": round(r["sales"], 2),
             "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
@@ -444,47 +502,7 @@ def view_reports():
         # 🔍 بحث باسم العميل وعرض كل بياناته
         st.divider()
         st.markdown("##### 🔍 بحث عن عميل بالاسم")
-        search = st.text_input("اكتب اسم العميل (أو جزء منه)", key="cust_search")
-        custs = db.customers_list()
-        if search.strip():
-            matches = [c for c in custs if search.strip().lower() in c.lower()]
-        else:
-            matches = custs
-
-        if not custs:
-            st.info("لا يوجد عملاء بعد.")
-        elif not matches:
-            st.warning("لا يوجد عميل بهذا الاسم.")
-        else:
-            chosen_cust = st.selectbox("اختر العميل", matches, key="rep_cust")
-            if chosen_cust:
-                citems = db.items_of_customer(chosen_cust)
-                # ملخص العميل
-                tot_sales = sum(it["selling_price_egp"] or 0 for it in citems)
-                tot_dep = sum(it["deposit_paid"] or 0 for it in citems)
-                tot_bal = tot_sales - tot_dep
-                tot_profit = sum((it["profit_egp"] or 0) for it in citems if it["weight_grams"] > 0)
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("عدد القطع", len(citems))
-                m2.metric("إجمالي البيع", egp(tot_sales))
-                m3.metric("المدفوع (عربون)", egp(tot_dep))
-                m4.metric("المتبقي عليه", egp(tot_bal))
-                m5.metric("صافي الربح", egp(tot_profit))
-
-                cdata = []
-                for it in citems:
-                    profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
-                    cdata.append({
-                        "رقم الأوردر": it["order_number"],
-                        "المنتج": it["product_name"],
-                        "سعر البيع": egp(it["selling_price_egp"]),
-                        "الوزن (جم)": f'{it["weight_grams"]:g}',
-                        "العربون": egp(it["deposit_paid"]),
-                        "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
-                        "الحالة": STATUS_AR.get(it["status"], it["status"]),
-                        "الربح": profit,
-                    })
-                st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+        _render_customer_search("rep")
 
     with tab3:
         st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
@@ -502,6 +520,7 @@ def view_reports():
                     "رقم الأوردر": it["order_number"],
                     "العميل": it["customer_name"],
                     "المنتج": it["product_name"],
+                    "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
                     "الوزن (جم)": f'{it["weight_grams"]:g}',
                     "سعر البيع": egp(it["selling_price_egp"]),
                     "إجمالي التكلفة": egp(it["total_cost_egp"]),
@@ -556,6 +575,7 @@ def _build_excel():
                      ("pieces","عدد القطع"),("yuan_total","إجمالي الشراء (يوان)"),
                      ("sales","المبيعات"),("cost","التكاليف"),("profit","الربح")])
     by_cust = df_of(db.report_by_customer(), [("customer_name","العميل"),("pieces","عدد القطع"),
+                    ("yuan_total","إجمالي الشراء (يوان)"),
                     ("sales","المبيعات"),("deposits","الودائع"),("balance","الرصيد"),("profit","الربح")])
     monthly = df_of(db.report_monthly(), [("period","الشهر"),("pieces","عدد القطع"),
                     ("sales","المبيعات"),("cost","التكاليف"),("profit","الربح")])
