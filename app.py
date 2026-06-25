@@ -16,17 +16,28 @@ from calculations import calc_item, payment_status, remaining_balance
 # ============================================================
 #  إعداد الصفحة + RTL
 # ============================================================
-st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵", layout="wide")
+st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     .stApp { direction: rtl; }
-    section[data-testid="stSidebar"] { direction: rtl; }
     h1, h2, h3, h4, h5, h6, p, label, div, span { text-align: right; }
     .stDataFrame { direction: ltr; }
     [data-testid="stMetricValue"] { direction: ltr; text-align: center; }
     [data-testid="stMetricLabel"] { justify-content: center; }
     .stButton button { width: 100%; }
+    /* إخفاء القايمة الجانبية وزر فتحها نهائياً (التنقل بقى فوق) */
+    section[data-testid="stSidebar"] { display: none !important; }
+    [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+    /* تحسين العرض على الموبايل */
+    @media (max-width: 640px) {
+        [data-testid="stMetricValue"] { font-size: 1.4rem; }
+        h1 { font-size: 1.5rem; }
+        h2 { font-size: 1.3rem; }
+        h3 { font-size: 1.1rem; }
+        .block-container { padding-top: 2rem; padding-left: 0.8rem; padding-right: 0.8rem; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,18 +82,18 @@ def go(view, order_id=None):
 # ============================================================
 #  الشريط الجانبي
 # ============================================================
-with st.sidebar:
-    st.title("🧵 إدارة الملابس")
-    st.caption("النسخة الويب")
-    st.divider()
-    if st.button("📊 لوحة المعلومات", use_container_width=True):
-        go("dashboard"); rerun()
-    if st.button("📦 الأوردرات", use_container_width=True):
-        go("orders"); rerun()
-    if st.button("📈 التقارير", use_container_width=True):
-        go("reports"); rerun()
-    st.divider()
-    st.caption("الإصدار 1.0 — ويب")
+# ============================================================
+#  شريط التنقل العلوي (بدل القايمة الجانبية)
+# ============================================================
+st.markdown("#### 🧵 إدارة الملابس المستوردة")
+nav1, nav2, nav3 = st.columns(3)
+if nav1.button("📊 لوحة المعلومات", use_container_width=True):
+    go("dashboard"); rerun()
+if nav2.button("📦 الأوردرات", use_container_width=True):
+    go("orders"); rerun()
+if nav3.button("📈 التقارير", use_container_width=True):
+    go("reports"); rerun()
+st.divider()
 
 
 # ============================================================
