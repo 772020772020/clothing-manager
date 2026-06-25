@@ -67,14 +67,19 @@ def _is_loss(text):
 
 
 def _style_profit(df, col="الربح"):
-    """تلوين القيم الخاسرة بالأحمر في عمود الربح."""
-    if col not in df.columns:
+    """تلوين القيم الخاسرة بالأحمر في عمود الربح (متوافق مع كل إصدارات pandas)."""
+    if col not in df.columns or df.empty:
         return df
 
     def color(val):
         return "color: #d62728; font-weight: 700;" if _is_loss(val) else ""
+
     try:
-        return df.style.applymap(color, subset=[col])
+        styler = df.style
+        # pandas الأحدث يستخدم map بدل applymap
+        if hasattr(styler, "map"):
+            return styler.map(color, subset=[col])
+        return styler.applymap(color, subset=[col])
     except Exception:
         return df
 
@@ -137,29 +142,49 @@ def view_dashboard():
     c10.metric("أرصدة مستحقة", egp(s["outstanding"]))
 
     st.divider()
-    # تغيير حالة أي قطعة بسرعة من لوحة المعلومات
-    with st.expander("🔄 تغيير حالة قطعة بسرعة", expanded=False):
-        all_items = db.all_items_with_order()
-        if all_items:
-            opts = {
-                f'أوردر {it["order_number"]} — {it["customer_name"]} — {it["product_name"]} '
-                f'({STATUS_AR.get(it["status"], it["status"])})': it["id"]
-                for it in all_items
-            }
-            chosen_label = st.selectbox("اختر القطعة", list(opts.keys()), key="dash_pick")
-            chosen_id = opts[chosen_label]
-            cur = db.get_item(chosen_id)
-            status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
-            cur_ar = STATUS_AR.get(cur["status"], status_ar_list[0])
-            new_ar = st.selectbox("الحالة الجديدة", status_ar_list,
-                                  index=status_ar_list.index(cur_ar), key="dash_status")
-            new_en = ITEM_STATUSES[status_ar_list.index(new_ar)]
-            if st.button("💾 حفظ الحالة", type="primary", key="dash_save_status"):
-                db.update_item_status(chosen_id, new_en)
-                st.success("تم تحديث الحالة.")
-                rerun()
-        else:
-            st.info("لا توجد قطع بعد.")
+    # استعراض القطع حسب الحالة + الدخول على أي قطعة وتعديلها
+    st.subheader("🔍 استعراض القطع حسب الحالة")
+    status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
+    # نعرض عدّاد جنب كل حالة
+    counts = db.status_counts()
+    labels = []
+    for en in ITEM_STATUSES:
+        ar = STATUS_AR[en]
+        labels.append(f"{ar} ({counts.get(en, 0)})")
+    picked = st.selectbox("اختر الحالة لعرض قطعها", labels, key="dash_status_filter")
+    picked_en = ITEM_STATUSES[labels.index(picked)]
+
+    status_items = db.items_by_status(picked_en)
+    if status_items:
+        # جدول سريع للقطع
+        tbl = []
+        for it in status_items:
+            profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
+            tbl.append({
+                "أوردر": it["order_number"],
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "الربح": profit,
+            })
+        st.dataframe(_style_profit(pd.DataFrame(tbl)), use_container_width=True, hide_index=True)
+        st.caption(f"عدد القطع في هذه الحالة: {len(status_items)}")
+
+        # الدخول على قطعة معيّنة وتعديلها بالكامل
+        st.markdown("##### الدخول على قطعة وتعديلها")
+        opts = {
+            f'أوردر {it["order_number"]} — {it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it["id"]
+            for it in status_items
+        }
+        chosen_label = st.selectbox("اختر القطعة", list(opts.keys()), key="dash_pick_item")
+        chosen_id = opts[chosen_label]
+        chosen_item = db.get_item(chosen_id)
+        oid_of_item = chosen_item["order_id"]
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _item_form(oid_of_item, item=chosen_item, form_key=f"dash_edit_{chosen_id}")
+    else:
+        st.info("لا توجد قطع في هذه الحالة.")
 
     st.subheader("آخر الأوردرات")
     rows = db.all_orders()[:10]
