@@ -110,13 +110,16 @@ def go(view, order_id=None):
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
 st.markdown("#### 🧵 إدارة الملابس المستوردة")
-nav1, nav2, nav3 = st.columns(3)
+nav1, nav2, nav3, nav4 = st.columns(4)
 if nav1.button("📊 لوحة المعلومات", use_container_width=True):
     go("dashboard"); rerun()
 if nav2.button("📦 الأوردرات", use_container_width=True):
     go("orders"); rerun()
 if nav3.button("📈 التقارير", use_container_width=True):
     go("reports"); rerun()
+if nav4.button("🔄 تحديث", use_container_width=True):
+    st.cache_data.clear()
+    rerun()
 st.divider()
 
 
