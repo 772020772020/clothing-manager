@@ -20,7 +20,7 @@ STATUS_AR = {
     "In Transit": "في الطريق",
     "Awaiting Weight": "بانتظار الوزن",
     "In Warehouse": "في المستودع",
-    "Out For Delivery": "خرج للتسليم",
+    "Out For Delivery": "مع شركة الشحن",
     "Delivered": "تم التسليم",
     "Cancelled": "ملغي",
 }
@@ -129,27 +129,64 @@ class Database:
         return calc_item(buy_yuan, weight_g, sell, o["purchase_yuan_rate"],
                          o["shipping_yuan_rate"], o["shipping_price_per_kg_yuan"])
 
-    def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0, status="Order Registered"):
+    def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
+                    status="Order Registered", weight_date=None):
         c = self._compute(oid, buy_yuan, weight_g, sell)
         return self._exec(
             """INSERT INTO items (order_id, customer_name, product_name, selling_price_egp,
                purchase_price_yuan, weight_grams, deposit_paid, status,
-               purchase_cost_egp, shipping_cost_egp, total_cost_egp, profit_egp)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               purchase_cost_egp, shipping_cost_egp, total_cost_egp, profit_egp, weight_date)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"]),
+             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date),
             fetch="id")
 
-    def update_item(self, iid, customer, product, sell, buy_yuan, weight_g=0, deposit=0, status="Order Registered"):
+    def update_item(self, iid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
+                    status="Order Registered", weight_date=None):
         it = self.get_item(iid)
         c = self._compute(it["order_id"], buy_yuan, weight_g, sell)
         self._exec(
             """UPDATE items SET customer_name=%s, product_name=%s, selling_price_egp=%s,
                purchase_price_yuan=%s, weight_grams=%s, deposit_paid=%s, status=%s,
-               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s
+               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s, weight_date=%s
                WHERE id=%s""",
             (customer, product, sell, buy_yuan, weight_g, deposit, status,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], iid))
+             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date, iid))
+
+    def update_item_status(self, iid, status):
+        """تحديث حالة القطعة فقط (للوحة المعلومات)."""
+        self._exec("UPDATE items SET status=%s WHERE id=%s", (status, iid))
+
+    def all_items_with_order(self):
+        """كل القطع مع رقم الأوردر (للوحة المعلومات والتعديل السريع)."""
+        return self._exec("""SELECT i.*, o.order_number FROM items i
+            JOIN orders o ON o.id=i.order_id
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
+
+    def items_by_weight_date(self, day):
+        """القطع اللي اتسجّل وزنها في يوم معين + أرباحها."""
+        return self._exec("""SELECT i.*, o.order_number FROM items i
+            JOIN orders o ON o.id=i.order_id
+            WHERE i.weight_date=%s AND i.weight_grams>0
+            ORDER BY o.order_number, i.id""", (day,), fetch="all")
+
+    def items_of_customer(self, customer):
+        """كل قطع عميل معين."""
+        return self._exec("""SELECT i.*, o.order_number FROM items i
+            JOIN orders o ON o.id=i.order_id
+            WHERE i.customer_name=%s
+            ORDER BY o.order_date::date DESC, i.id ASC""", (customer,), fetch="all")
+
+    def weight_dates(self):
+        """كل التواريخ اللي فيها قطع اتسجّل وزنها (للاختيار)."""
+        rows = self._exec("""SELECT DISTINCT weight_date FROM items
+            WHERE weight_date IS NOT NULL AND weight_grams>0
+            ORDER BY weight_date DESC""", fetch="all")
+        return [r["weight_date"] for r in rows]
+
+    def customers_list(self):
+        rows = self._exec("SELECT DISTINCT customer_name FROM items ORDER BY customer_name", fetch="all")
+        return [r["customer_name"] for r in rows]
 
     def delete_item(self, iid):
         self._exec("DELETE FROM items WHERE id=%s", (iid,))
