@@ -262,6 +262,7 @@ class Database:
 
     def report_by_customer(self):
         return self._exec("""SELECT customer_name, COUNT(*) pieces,
+            COALESCE(SUM(purchase_price_yuan),0) yuan_total,
             COALESCE(SUM(selling_price_egp),0) sales,
             COALESCE(SUM(deposit_paid),0) deposits,
             COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
