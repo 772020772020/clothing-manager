@@ -6,7 +6,7 @@ app.py
 """
 
 import io
-from datetime import date
+from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
@@ -58,6 +58,25 @@ def egp(v):
         return f"{float(v):,.2f} ج.م"
     except (TypeError, ValueError):
         return "0.00 ج.م"
+
+
+def _is_loss(text):
+    """يتحقق لو القيمة في عمود الربح خسارة (سالبة)."""
+    s = str(text)
+    return s.strip().startswith("-") or "-" in s.split("ج.م")[0]
+
+
+def _style_profit(df, col="الربح"):
+    """تلوين القيم الخاسرة بالأحمر في عمود الربح."""
+    if col not in df.columns:
+        return df
+
+    def color(val):
+        return "color: #d62728; font-weight: 700;" if _is_loss(val) else ""
+    try:
+        return df.style.applymap(color, subset=[col])
+    except Exception:
+        return df
 
 
 def rerun():
@@ -118,6 +137,30 @@ def view_dashboard():
     c10.metric("أرصدة مستحقة", egp(s["outstanding"]))
 
     st.divider()
+    # تغيير حالة أي قطعة بسرعة من لوحة المعلومات
+    with st.expander("🔄 تغيير حالة قطعة بسرعة", expanded=False):
+        all_items = db.all_items_with_order()
+        if all_items:
+            opts = {
+                f'أوردر {it["order_number"]} — {it["customer_name"]} — {it["product_name"]} '
+                f'({STATUS_AR.get(it["status"], it["status"])})': it["id"]
+                for it in all_items
+            }
+            chosen_label = st.selectbox("اختر القطعة", list(opts.keys()), key="dash_pick")
+            chosen_id = opts[chosen_label]
+            cur = db.get_item(chosen_id)
+            status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
+            cur_ar = STATUS_AR.get(cur["status"], status_ar_list[0])
+            new_ar = st.selectbox("الحالة الجديدة", status_ar_list,
+                                  index=status_ar_list.index(cur_ar), key="dash_status")
+            new_en = ITEM_STATUSES[status_ar_list.index(new_ar)]
+            if st.button("💾 حفظ الحالة", type="primary", key="dash_save_status"):
+                db.update_item_status(chosen_id, new_en)
+                st.success("تم تحديث الحالة.")
+                rerun()
+        else:
+            st.info("لا توجد قطع بعد.")
+
     st.subheader("آخر الأوردرات")
     rows = db.all_orders()[:10]
     if rows:
@@ -142,22 +185,24 @@ def view_orders():
     st.header("📦 إدارة الأوردرات")
 
     with st.expander("➕ إضافة أوردر جديد", expanded=False):
-        with st.form("new_order", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            number = col1.text_input("رقم الأوردر")
-            order_date = col2.date_input("تاريخ الأوردر", value=date.today())
-            col3, col4, col5 = st.columns(3)
-            buy_rate = col3.number_input("سعر اليوان وقت الشراء", min_value=0.0, step=0.1, format="%.2f")
-            ship_rate = col4.number_input("سعر يوان الشحن (لاحقاً)", min_value=0.0, step=0.1, format="%.2f")
-            ship_kg = col5.number_input("سعر كيلو الشحن باليوان (لاحقاً)", min_value=0.0, step=1.0, format="%.2f")
-            notes = st.text_input("ملاحظات")
-            if st.form_submit_button("حفظ الأوردر", type="primary"):
-                if not number.strip():
-                    st.error("اكتب رقم الأوردر.")
-                else:
-                    db.create_order(number.strip(), order_date.isoformat(), buy_rate, ship_rate, ship_kg, notes)
-                    st.success("تم إضافة الأوردر.")
-                    rerun()
+        col1, col2 = st.columns(2)
+        number = col1.text_input("رقم الأوردر", key="no_num")
+        order_date = col2.date_input("تاريخ الأوردر", value=date.today(), key="no_date")
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            buy_rate = _num("سعر اليوان وقت الشراء", 0, key="no_buy")
+        with col4:
+            ship_rate = _num("سعر يوان الشحن (لاحقاً)", 0, key="no_shiprate")
+        with col5:
+            ship_kg = _num("سعر كيلو الشحن باليوان (لاحقاً)", 0, key="no_shipkg")
+        notes = st.text_input("ملاحظات", key="no_notes")
+        if st.button("حفظ الأوردر", type="primary", key="no_save"):
+            if not number.strip():
+                st.error("اكتب رقم الأوردر.")
+            else:
+                db.create_order(number.strip(), order_date.isoformat(), buy_rate, ship_rate, ship_kg, notes)
+                st.success("تم إضافة الأوردر.")
+                rerun()
 
     search = st.text_input("🔍 ابحث برقم الأوردر أو التاريخ", "")
     orders = db.all_orders()
@@ -201,16 +246,18 @@ def view_order_details():
     # أسعار الأوردر
     with st.container(border=True):
         st.subheader("أسعار الأوردر")
-        with st.form("rates"):
-            c1, c2, c3 = st.columns(3)
-            buy_rate = c1.number_input("سعر اليوان وقت الشراء", value=float(o["purchase_yuan_rate"]), step=0.1, format="%.2f")
-            ship_rate = c2.number_input("سعر يوان الشحن", value=float(o["shipping_yuan_rate"]), step=0.1, format="%.2f")
-            ship_kg = c3.number_input("سعر كيلو الشحن باليوان", value=float(o["shipping_price_per_kg_yuan"]), step=1.0, format="%.2f")
-            st.caption("عند تعديل الأسعار يُعاد حساب كل القطع تلقائياً")
-            if st.form_submit_button("💾 حفظ الأسعار وإعادة الحساب", type="primary"):
-                db.update_order(oid, o["order_number"], o["order_date"], buy_rate, ship_rate, ship_kg, o["notes"])
-                st.success("تم الحفظ وإعادة الحساب.")
-                rerun()
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            buy_rate = _num("سعر اليوان وقت الشراء", o["purchase_yuan_rate"], key=f"rate_buy_{oid}")
+        with c2:
+            ship_rate = _num("سعر يوان الشحن", o["shipping_yuan_rate"], key=f"rate_ship_{oid}")
+        with c3:
+            ship_kg = _num("سعر كيلو الشحن باليوان", o["shipping_price_per_kg_yuan"], key=f"rate_kg_{oid}")
+        st.caption("عند تعديل الأسعار يُعاد حساب كل القطع تلقائياً")
+        if st.button("💾 حفظ الأسعار وإعادة الحساب", type="primary", key=f"save_rates_{oid}"):
+            db.update_order(oid, o["order_number"], o["order_date"], buy_rate, ship_rate, ship_kg, o["notes"])
+            st.success("تم الحفظ وإعادة الحساب.")
+            rerun()
 
     # إضافة قطعة
     with st.expander("➕ إضافة قطعة جديدة", expanded=False):
@@ -235,7 +282,8 @@ def view_order_details():
                 "الحالة": STATUS_AR.get(it["status"], it["status"]),
                 "الربح": profit,
             })
-        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+        df = pd.DataFrame(data)
+        st.dataframe(_style_profit(df), use_container_width=True, hide_index=True)
 
         # تعديل / حذف قطعة
         st.markdown("##### تعديل أو حذف قطعة")
@@ -264,49 +312,81 @@ def view_order_details():
     t5.metric("صافي الربح", egp(s["profit"]))
 
 
+def _num(label, value, key):
+    """حقل رقمي يظهر فاضي بدل 0.00 (نص يتحوّل لرقم)."""
+    txt = st.text_input(label, value=("" if (value in (None, 0, 0.0)) else _fmt_plain(value)), key=key)
+    txt = (txt or "").strip().replace(",", "")
+    if txt == "":
+        return 0.0
+    try:
+        return float(txt)
+    except ValueError:
+        return 0.0
+
+
+def _fmt_plain(v):
+    f = float(v)
+    return str(int(f)) if f == int(f) else str(f)
+
+
 def _item_form(oid, item, form_key):
     """نموذج إضافة/تعديل قطعة مع معاينة حية."""
     order = db.get_order(oid)
     is_edit = item is not None
+    k = form_key  # بادئة فريدة للحقول
 
-    with st.form(form_key, clear_on_submit=not is_edit):
-        c1, c2 = st.columns(2)
-        customer = c1.text_input("اسم العميل", value=item["customer_name"] if is_edit else "")
-        product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "")
-        c3, c4, c5 = st.columns(3)
-        sell = c3.number_input("سعر البيع بالمصري", min_value=0.0, step=10.0,
-                               value=float(item["selling_price_egp"]) if is_edit else 0.0, format="%.2f")
-        buy_yuan = c4.number_input("سعر الشراء باليوان", min_value=0.0, step=1.0,
-                                   value=float(item["purchase_price_yuan"]) if is_edit else 0.0, format="%.2f")
-        weight = c5.number_input("الوزن بالجرام", min_value=0.0, step=10.0,
-                                 value=float(item["weight_grams"]) if is_edit else 0.0, format="%.1f")
-        c6, c7 = st.columns(2)
-        deposit = c6.number_input("العربون المدفوع", min_value=0.0, step=10.0,
-                                  value=float(item["deposit_paid"]) if is_edit else 0.0, format="%.2f")
-        status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
-        cur_status_ar = STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
-        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar))
-        status_en = ITEM_STATUSES[status_ar_list.index(status_ar)]
+    c1, c2 = st.columns(2)
+    customer = c1.text_input("اسم العميل", value=item["customer_name"] if is_edit else "", key=f"{k}_cust")
+    product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+    with c4:
+        buy_yuan = _num("سعر الشراء باليوان", item["purchase_price_yuan"] if is_edit else 0, key=f"{k}_buy")
+    with c5:
+        weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
+    c6, c7 = st.columns(2)
+    with c6:
+        deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+    status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
+    cur_status_ar = STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
+    status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
+    status_en = ITEM_STATUSES[status_ar_list.index(status_ar)]
 
-        # معاينة الحساب
-        c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"],
-                      order["shipping_yuan_rate"], order["shipping_price_per_kg_yuan"])
-        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
-        st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
-                   f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+    # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
+    weight_date = None
+    if weight > 0:
+        existing = None
+        if is_edit and item.get("weight_date"):
+            try:
+                existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                existing = date.today()
+        wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
+        weight_date = wd.isoformat()
 
-        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
-        if st.form_submit_button(label, type="primary"):
-            if not customer.strip() or not product.strip():
-                st.error("اكتب اسم العميل واسم المنتج.")
+    # معاينة الحساب
+    c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"],
+                  order["shipping_yuan_rate"], order["shipping_price_per_kg_yuan"])
+    prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
+    st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
+               f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+
+    label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
+    if st.button(label, type="primary", key=f"{k}_save"):
+        if not customer.strip() or not product.strip():
+            st.error("اكتب اسم العميل واسم المنتج.")
+        else:
+            if is_edit:
+                db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
+                               weight, deposit, status_en, weight_date)
+                st.success("تم تعديل القطعة.")
             else:
-                if is_edit:
-                    db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan, weight, deposit, status_en)
-                    st.success("تم تعديل القطعة.")
-                else:
-                    db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan, weight, deposit, status_en)
-                    st.success("تمت إضافة القطعة.")
-                rerun()
+                db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
+                               weight, deposit, status_en, weight_date)
+                st.success("تمت إضافة القطعة.")
+            rerun()
+
 
 
 # ============================================================
@@ -315,7 +395,8 @@ def _item_form(oid, item, form_key):
 def view_reports():
     st.header("📈 التقارير")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["أرباح الأوردرات", "أرباح العملاء", "أرباح شهرية", "أرباح سنوية"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية"])
 
     with tab1:
         rows = db.report_by_order()
@@ -335,7 +416,59 @@ def view_reports():
         } for r in rows])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
+        # الدخول على عميل لعرض قطعه
+        st.markdown("##### عرض تفاصيل عميل")
+        custs = db.customers_list()
+        if custs:
+            chosen_cust = st.selectbox("اختر العميل", custs, key="rep_cust")
+            if chosen_cust:
+                citems = db.items_of_customer(chosen_cust)
+                cdata = []
+                for it in citems:
+                    profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
+                    cdata.append({
+                        "رقم الأوردر": it["order_number"],
+                        "المنتج": it["product_name"],
+                        "سعر البيع": egp(it["selling_price_egp"]),
+                        "الوزن (جم)": f'{it["weight_grams"]:g}',
+                        "العربون": egp(it["deposit_paid"]),
+                        "الحالة": STATUS_AR.get(it["status"], it["status"]),
+                        "الربح": profit,
+                    })
+                st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+        else:
+            st.info("لا يوجد عملاء بعد.")
+
     with tab3:
+        st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
+        chosen_day = st.date_input("اختر اليوم", value=date.today(), key="arr_day")
+        day_str = chosen_day.isoformat()
+        arr = db.items_by_weight_date(day_str)
+        if arr:
+            adata = []
+            total_profit = 0.0
+            total_sales = 0.0
+            for it in arr:
+                total_profit += it["profit_egp"] or 0
+                total_sales += it["selling_price_egp"] or 0
+                adata.append({
+                    "رقم الأوردر": it["order_number"],
+                    "العميل": it["customer_name"],
+                    "المنتج": it["product_name"],
+                    "الوزن (جم)": f'{it["weight_grams"]:g}',
+                    "سعر البيع": egp(it["selling_price_egp"]),
+                    "إجمالي التكلفة": egp(it["total_cost_egp"]),
+                    "الربح": egp(it["profit_egp"]),
+                })
+            m1, m2, m3 = st.columns(3)
+            m1.metric("عدد القطع الواصلة", len(arr))
+            m2.metric("إجمالي مبيعاتها", egp(total_sales))
+            m3.metric("إجمالي ربحها", egp(total_profit))
+            st.dataframe(_style_profit(pd.DataFrame(adata)), use_container_width=True, hide_index=True)
+        else:
+            st.info("لا توجد قطع سُجّل وزنها في هذا اليوم.")
+
+    with tab4:
         rows = db.report_monthly()
         df = pd.DataFrame([{
             "الشهر": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
@@ -343,7 +476,7 @@ def view_reports():
         } for r in rows])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with tab4:
+    with tab5:
         rows = db.report_yearly()
         df = pd.DataFrame([{
             "السنة": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
