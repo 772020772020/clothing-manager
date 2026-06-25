@@ -16,8 +16,7 @@ from calculations import calc_item, payment_status, remaining_balance
 # ============================================================
 #  إعداد الصفحة + RTL
 # ============================================================
-st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵",
-                   layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵", layout="wide")
 
 st.markdown("""
 <style>
@@ -28,17 +27,6 @@ st.markdown("""
     [data-testid="stMetricValue"] { direction: ltr; text-align: center; }
     [data-testid="stMetricLabel"] { justify-content: center; }
     .stButton button { width: 100%; }
-    /* منع نص القايمة الجانبية من الانعصار رأسياً */
-    section[data-testid="stSidebar"] { min-width: 230px !important; }
-    section[data-testid="stSidebar"] * { white-space: normal; word-break: keep-all; }
-    /* تحسين العرض على الموبايل */
-    @media (max-width: 640px) {
-        [data-testid="stMetricValue"] { font-size: 1.4rem; }
-        h1 { font-size: 1.5rem; }
-        h2 { font-size: 1.3rem; }
-        h3 { font-size: 1.1rem; }
-        .block-container { padding-top: 2.5rem; padding-left: 1rem; padding-right: 1rem; }
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,7 +72,8 @@ def go(view, order_id=None):
 #  الشريط الجانبي
 # ============================================================
 with st.sidebar:
-    st.markdown("### 🧵 إدارة الملابس")
+    st.title("🧵 إدارة الملابس")
+    st.caption("النسخة الويب")
     st.divider()
     if st.button("📊 لوحة المعلومات", use_container_width=True):
         go("dashboard"); rerun()
@@ -93,7 +82,7 @@ with st.sidebar:
     if st.button("📈 التقارير", use_container_width=True):
         go("reports"); rerun()
     st.divider()
-    st.caption("الإصدار 1.0")
+    st.caption("الإصدار 1.0 — ويب")
 
 
 # ============================================================
