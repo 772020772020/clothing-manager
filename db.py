@@ -157,6 +157,18 @@ class Database:
         """تحديث حالة القطعة فقط (للوحة المعلومات)."""
         self._exec("UPDATE items SET status=%s WHERE id=%s", (status, iid))
 
+    def items_by_status(self, status):
+        """كل القطع في حالة معيّنة مع رقم الأوردر."""
+        return self._exec("""SELECT i.*, o.order_number FROM items i
+            JOIN orders o ON o.id=i.order_id
+            WHERE i.status=%s
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", (status,), fetch="all")
+
+    def status_counts(self):
+        """عدد القطع في كل حالة."""
+        rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
+        return {r["status"]: r["c"] for r in rows}
+
     def all_items_with_order(self):
         """كل القطع مع رقم الأوردر (للوحة المعلومات والتعديل السريع)."""
         return self._exec("""SELECT i.*, o.order_number FROM items i
