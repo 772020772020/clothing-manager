@@ -143,7 +143,7 @@ def _render_customer_search(key_prefix):
     if not chosen_cust:
         return
     citems = db.items_of_customer(chosen_cust)
-    # نستبعد القطع الملغية (نفذ من المصدر) من كل الحسابات
+    # نستبعد القطع المرتجعة من كل الحسابات
     active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled")]
     tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
     tot_dep = sum(it["deposit_paid"] or 0 for it in active)
