@@ -143,13 +143,15 @@ def _render_customer_search(key_prefix):
     if not chosen_cust:
         return
     citems = db.items_of_customer(chosen_cust)
-    tot_sales = sum(it["selling_price_egp"] or 0 for it in citems)
-    tot_dep = sum(it["deposit_paid"] or 0 for it in citems)
+    # نستبعد القطع الملغية (نفذ من المصدر) من كل الحسابات
+    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled")]
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in active)
     tot_bal = tot_sales - tot_dep
-    tot_yuan = sum(it["purchase_price_yuan"] or 0 for it in citems)
-    tot_profit = sum((it["profit_egp"] or 0) for it in citems if it["weight_grams"] > 0)
+    tot_yuan = sum(it["purchase_price_yuan"] or 0 for it in active)
+    tot_profit = sum((it["profit_egp"] or 0) for it in active if it["weight_grams"] > 0)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("عدد القطع", len(citems))
+    m1.metric("عدد القطع", len(active))
     m2.metric("إجمالي البيع", egp(tot_sales))
     m3.metric("المدفوع (عربون)", egp(tot_dep))
     m4.metric("المتبقي عليه", egp(tot_bal))
@@ -341,6 +343,18 @@ def view_order_details():
         if st.button("💾 حفظ الأسعار وإعادة الحساب", type="primary", key=f"save_rates_{oid}"):
             db.update_order(oid, o["order_number"], o["order_date"], buy_rate, ship_rate, ship_kg, o["notes"])
             st.success("تم الحفظ وإعادة الحساب.")
+            rerun()
+
+    # ملاحظات الأوردر
+    with st.container(border=True):
+        st.subheader("📝 ملاحظات الأوردر")
+        new_notes = st.text_area("الملاحظة", value=o["notes"] or "", key=f"notes_{oid}",
+                                 placeholder="اكتب أي ملاحظة على الأوردر هنا...")
+        if st.button("💾 حفظ الملاحظة", key=f"save_notes_{oid}"):
+            db.update_order(oid, o["order_number"], o["order_date"],
+                            o["purchase_yuan_rate"], o["shipping_yuan_rate"],
+                            o["shipping_price_per_kg_yuan"], new_notes)
+            st.success("تم حفظ الملاحظة.")
             rerun()
 
     # إضافة قطعة
