@@ -294,3 +294,5 @@ class Database:
         return self._exec("""SELECT o.order_number, o.order_date, i.customer_name, i.product_name,
             i.selling_price_egp, i.purchase_price_yuan, i.weight_grams, i.deposit_paid, i.status,
             i.purchase_cost_egp, i.shipping_cost_egp, i.total_cost_egp, i.profit_egp
+            FROM items i JOIN orders o ON o.id=i.order_id
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
