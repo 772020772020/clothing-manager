@@ -12,7 +12,7 @@ from calculations import calc_item
 ITEM_STATUSES = [
     "Order Registered", "Purchased From China", "In Transit",
     "Awaiting Weight", "In Warehouse", "Out For Delivery",
-    "Delivered", "Cancelled",
+    "Delivered", "Out of Stock",
 ]
 STATUS_AR = {
     "Order Registered": "تم التسجيل",
@@ -22,7 +22,7 @@ STATUS_AR = {
     "In Warehouse": "في المستودع",
     "Out For Delivery": "مع شركة الشحن",
     "Delivered": "تم التسليم",
-    "Cancelled": "ملغي",
+    "Out of Stock": "نفذ من المصدر",
 }
 
 
@@ -127,7 +127,7 @@ class Database:
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit
-            FROM items WHERE order_id=%s
+            FROM items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled')
         """, (oid,), fetch="one")
 
     # ---------- قطع ----------
@@ -183,10 +183,11 @@ class Database:
             ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
 
     def items_by_weight_date(self, day):
-        """القطع اللي اتسجّل وزنها في يوم معين + أرباحها."""
+        """القطع اللي اتسجّل وزنها في يوم معين + أرباحها (بدون الملغي)."""
         return self._exec("""SELECT i.*, o.order_number FROM items i
             JOIN orders o ON o.id=i.order_id
             WHERE i.weight_date=%s AND i.weight_grams>0
+              AND i.status NOT IN ('Out of Stock','Cancelled')
             ORDER BY o.order_number, i.id""", (day,), fetch="all")
 
     def items_of_customer(self, customer):
@@ -238,7 +239,7 @@ class Database:
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit,
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
-            FROM items
+            FROM items WHERE status NOT IN ('Out of Stock','Cancelled')
         """, fetch="one")
         sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
         sc = {row["status"]: row["c"] for row in sc_rows}
@@ -258,6 +259,7 @@ class Database:
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
             FROM orders o LEFT JOIN items i ON i.order_id=o.id
+                AND i.status NOT IN ('Out of Stock','Cancelled')
             GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
 
     def report_by_customer(self):
@@ -267,7 +269,8 @@ class Database:
             COALESCE(SUM(deposit_paid),0) deposits,
             COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
             COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit
-            FROM items GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
+            FROM items WHERE status NOT IN ('Out of Stock','Cancelled')
+            GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
     def report_monthly(self):
         return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
@@ -275,6 +278,7 @@ class Database:
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
             FROM orders o LEFT JOIN items i ON i.order_id=o.id
+                AND i.status NOT IN ('Out of Stock','Cancelled')
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def report_yearly(self):
@@ -283,11 +287,10 @@ class Database:
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
             FROM orders o LEFT JOIN items i ON i.order_id=o.id
+                AND i.status NOT IN ('Out of Stock','Cancelled')
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def all_items_detailed(self):
         return self._exec("""SELECT o.order_number, o.order_date, i.customer_name, i.product_name,
             i.selling_price_egp, i.purchase_price_yuan, i.weight_grams, i.deposit_paid, i.status,
             i.purchase_cost_egp, i.shipping_cost_egp, i.total_cost_egp, i.profit_egp
-            FROM items i JOIN orders o ON o.id=i.order_id
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
