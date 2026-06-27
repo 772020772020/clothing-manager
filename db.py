@@ -25,6 +25,15 @@ STATUS_AR = {
     "Out of Stock": "نفذ من المصدر",
 }
 
+# ===== نظام أمريكا (حساب مبسّط: الربح = البيع − التكلفة) =====
+USA_STATUSES = ["In Transit", "In Warehouse", "Out For Delivery", "Delivered"]
+USA_STATUS_AR = {
+    "In Transit": "في الطريق",
+    "In Warehouse": "في المستودع",
+    "Out For Delivery": "مع شركة الشحن",
+    "Delivered": "تم التسليم",
+}
+
 
 def connect(cfg):
     """إنشاء اتصال بقاعدة بيانات Supabase."""
@@ -296,3 +305,150 @@ class Database:
             i.purchase_cost_egp, i.shipping_cost_egp, i.total_cost_egp, i.profit_egp
             FROM items i JOIN orders o ON o.id=i.order_id
             ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
+
+    # ============================================================
+    #  نظام أمريكا (جداول منفصلة، حساب مبسّط)
+    # ============================================================
+    def usa_init(self):
+        """إنشاء جداول أمريكا لو مش موجودة."""
+        self._exec("""CREATE TABLE IF NOT EXISTS usa_orders (
+            id SERIAL PRIMARY KEY,
+            order_number TEXT NOT NULL,
+            order_date TEXT NOT NULL,
+            supplier_name TEXT DEFAULT '',
+            notes TEXT DEFAULT ''
+        )""")
+        self._exec("""CREATE TABLE IF NOT EXISTS usa_items (
+            id SERIAL PRIMARY KEY,
+            order_id INTEGER NOT NULL REFERENCES usa_orders(id) ON DELETE CASCADE,
+            customer_name TEXT DEFAULT '',
+            product_name TEXT DEFAULT '',
+            cost_egp DOUBLE PRECISION DEFAULT 0,
+            selling_price_egp DOUBLE PRECISION DEFAULT 0,
+            deposit_paid DOUBLE PRECISION DEFAULT 0,
+            profit_egp DOUBLE PRECISION DEFAULT 0,
+            status TEXT DEFAULT 'In Transit'
+        )""")
+
+    # ---------- أوردرات أمريكا ----------
+    def usa_create_order(self, number, date, supplier="", notes=""):
+        return self._exec(
+            """INSERT INTO usa_orders (order_number, order_date, supplier_name, notes)
+               VALUES (%s,%s,%s,%s) RETURNING id""",
+            (number, date, supplier, notes), fetch="id")
+
+    def usa_update_order(self, oid, number, date, supplier, notes=""):
+        self._exec(
+            """UPDATE usa_orders SET order_number=%s, order_date=%s, supplier_name=%s, notes=%s
+               WHERE id=%s""",
+            (number, date, supplier, notes, oid))
+
+    def usa_delete_order(self, oid):
+        self._exec("DELETE FROM usa_orders WHERE id=%s", (oid,))
+
+    def usa_get_order(self, oid):
+        return self._exec("SELECT * FROM usa_orders WHERE id=%s", (oid,), fetch="one")
+
+    def usa_all_orders(self):
+        return self._exec("""
+            SELECT * FROM usa_orders
+            ORDER BY
+                CASE WHEN order_number ~ '^[0-9]+$' THEN 0 ELSE 1 END,
+                CASE WHEN order_number ~ '^[0-9]+$' THEN CAST(order_number AS BIGINT) ELSE NULL END DESC,
+                order_number DESC
+        """, fetch="all")
+
+    def usa_order_summary(self, oid):
+        return self._exec("""
+            SELECT COUNT(*) pieces,
+                COALESCE(SUM(CASE WHEN status='Delivered' THEN 1 ELSE 0 END),0) delivered,
+                COALESCE(SUM(selling_price_egp),0) sales,
+                COALESCE(SUM(cost_egp),0) cost,
+                COALESCE(SUM(deposit_paid),0) deposits,
+                COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
+                COALESCE(SUM(profit_egp),0) profit
+            FROM usa_items WHERE order_id=%s
+        """, (oid,), fetch="one")
+
+    # ---------- قطع أمريكا ----------
+    def usa_add_item(self, order_id, customer, product, cost, sell, deposit, status="In Transit"):
+        profit = (sell or 0) - (cost or 0)
+        return self._exec(
+            """INSERT INTO usa_items (order_id, customer_name, product_name, cost_egp,
+               selling_price_egp, deposit_paid, profit_egp, status)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (order_id, customer, product, cost, sell, deposit, profit, status), fetch="id")
+
+    def usa_update_item(self, item_id, customer, product, cost, sell, deposit, status):
+        profit = (sell or 0) - (cost or 0)
+        self._exec(
+            """UPDATE usa_items SET customer_name=%s, product_name=%s, cost_egp=%s,
+               selling_price_egp=%s, deposit_paid=%s, profit_egp=%s, status=%s WHERE id=%s""",
+            (customer, product, cost, sell, deposit, profit, status, item_id))
+
+    def usa_delete_item(self, item_id):
+        self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
+
+    def usa_items_of(self, order_id):
+        return self._exec("SELECT * FROM usa_items WHERE order_id=%s ORDER BY id ASC",
+                          (order_id,), fetch="all")
+
+    def usa_items_of_customer(self, name):
+        return self._exec("""SELECT i.*, o.order_number, o.supplier_name FROM usa_items i
+            JOIN usa_orders o ON o.id=i.order_id
+            WHERE i.customer_name=%s ORDER BY o.id DESC, i.id ASC""", (name,), fetch="all")
+
+    def usa_customers_list(self):
+        rows = self._exec("""SELECT DISTINCT customer_name FROM usa_items
+            WHERE customer_name<>'' ORDER BY customer_name""", fetch="all")
+        return [r["customer_name"] for r in rows]
+
+    # ---------- لوحة معلومات أمريكا ----------
+    def usa_dashboard(self):
+        orders = self._exec("SELECT COUNT(*) c FROM usa_orders", fetch="one")["c"]
+        r = self._exec("""
+            SELECT COUNT(*) pieces,
+                COALESCE(SUM(selling_price_egp),0) sales,
+                COALESCE(SUM(cost_egp),0) cost,
+                COALESCE(SUM(profit_egp),0) profit,
+                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
+            FROM usa_items
+        """, fetch="one")
+        return {
+            "orders": orders, "pieces": r["pieces"], "sales": r["sales"],
+            "cost": r["cost"], "profit": r["profit"], "outstanding": r["outstanding"],
+        }
+
+    # ---------- تقارير أمريكا ----------
+    def usa_report_by_order(self):
+        return self._exec("""SELECT o.order_number, o.order_date, o.supplier_name, COUNT(i.id) pieces,
+            COALESCE(SUM(i.cost_egp),0) cost,
+            COALESCE(SUM(i.selling_price_egp),0) sales,
+            COALESCE(SUM(i.profit_egp),0) profit
+            FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
+            GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
+
+    def usa_report_by_customer(self):
+        return self._exec("""SELECT customer_name, COUNT(*) pieces,
+            COALESCE(SUM(cost_egp),0) cost,
+            COALESCE(SUM(selling_price_egp),0) sales,
+            COALESCE(SUM(deposit_paid),0) deposits,
+            COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
+            COALESCE(SUM(profit_egp),0) profit
+            FROM usa_items GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
+
+    def usa_report_monthly(self):
+        return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
+            COALESCE(SUM(i.cost_egp),0) cost,
+            COALESCE(SUM(i.selling_price_egp),0) sales,
+            COALESCE(SUM(i.profit_egp),0) profit
+            FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
+            GROUP BY period ORDER BY period DESC""", fetch="all")
+
+    def usa_report_yearly(self):
+        return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY') period, COUNT(i.id) pieces,
+            COALESCE(SUM(i.cost_egp),0) cost,
+            COALESCE(SUM(i.selling_price_egp),0) sales,
+            COALESCE(SUM(i.profit_egp),0) profit
+            FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
+            GROUP BY period ORDER BY period DESC""", fetch="all")
