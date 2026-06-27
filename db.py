@@ -12,7 +12,7 @@ from calculations import calc_item
 ITEM_STATUSES = [
     "Order Registered", "Purchased From China", "In Transit",
     "Awaiting Weight", "In Warehouse", "Out For Delivery",
-    "Delivered", "Ready For Sale", "Out of Stock",
+    "Delivered", "Delivered Unpaid", "Ready For Sale", "Out of Stock",
 ]
 STATUS_AR = {
     "Order Registered": "تم التسجيل",
@@ -22,17 +22,19 @@ STATUS_AR = {
     "In Warehouse": "في المستودع",
     "Out For Delivery": "مع شركة الشحن",
     "Delivered": "تم التسليم",
+    "Delivered Unpaid": "تسليم - آجل",
     "Ready For Sale": "فوري (للبيع)",
     "Out of Stock": "نفذ من المصدر",
 }
 
 # ===== نظام أمريكا (حساب مبسّط: الربح = البيع − التكلفة) =====
-USA_STATUSES = ["In Transit", "In Warehouse", "Out For Delivery", "Delivered", "Ready For Sale"]
+USA_STATUSES = ["In Transit", "In Warehouse", "Out For Delivery", "Delivered", "Delivered Unpaid", "Ready For Sale"]
 USA_STATUS_AR = {
     "In Transit": "في الطريق",
     "In Warehouse": "في المستودع",
     "Out For Delivery": "مع شركة الشحن",
     "Delivered": "تم التسليم",
+    "Delivered Unpaid": "تسليم - آجل",
     "Ready For Sale": "فوري (للبيع)",
 }
 
@@ -390,6 +392,9 @@ class Database:
 
     def usa_delete_item(self, item_id):
         self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
+
+    def usa_update_item_status(self, item_id, status):
+        self._exec("UPDATE usa_items SET status=%s WHERE id=%s", (status, item_id))
 
     def usa_items_of(self, order_id):
         return self._exec("SELECT * FROM usa_items WHERE order_id=%s ORDER BY id ASC",
