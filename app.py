@@ -125,32 +125,36 @@ st.markdown("#### 🧵 إدارة الملابس المستوردة")
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 in_usa = st.session_state.get("view", "dashboard") in USA_VIEWS
 
-# سطر تبديل النظام (الصين / أمريكا) + تحديث
-s1, s2, s3 = st.columns(3)
-if s1.button(("🟢 " if not in_usa else "") + "🇨🇳 الصين", use_container_width=True):
+# ===== التبويبتان الكبيرتان: الصين / أمريكا =====
+big1, big2 = st.columns(2)
+if big1.button("🇨🇳 الصين", use_container_width=True,
+               type=("primary" if not in_usa else "secondary")):
     go("dashboard"); rerun()
-if s2.button(("🟢 " if in_usa else "") + "🇺🇸 أمريكا", use_container_width=True):
+if big2.button("🇺🇸 أمريكا", use_container_width=True,
+               type=("primary" if in_usa else "secondary")):
     go("usa_dashboard"); rerun()
-if s3.button("🔄 تحديث", use_container_width=True):
-    st.cache_data.clear(); rerun()
 
-# سطر أقسام النظام الحالي
+# ===== أقسام النظام المختار =====
 if in_usa:
-    n1, n2, n3 = st.columns(3)
-    if n1.button("📊 لوحة أمريكا", use_container_width=True):
+    n1, n2, n3, n4 = st.columns(4)
+    if n1.button("📊 لوحة المعلومات", use_container_width=True, key="usa_nav_dash"):
         go("usa_dashboard"); rerun()
-    if n2.button("📦 أوردرات أمريكا", use_container_width=True):
+    if n2.button("📦 الأوردرات", use_container_width=True, key="usa_nav_ord"):
         go("usa_orders"); rerun()
-    if n3.button("📈 تقارير أمريكا", use_container_width=True):
+    if n3.button("📈 التقارير", use_container_width=True, key="usa_nav_rep"):
         go("usa_reports"); rerun()
+    if n4.button("🔄 تحديث", use_container_width=True, key="usa_nav_ref"):
+        st.cache_data.clear(); rerun()
 else:
-    n1, n2, n3 = st.columns(3)
-    if n1.button("📊 لوحة المعلومات", use_container_width=True):
+    n1, n2, n3, n4 = st.columns(4)
+    if n1.button("📊 لوحة المعلومات", use_container_width=True, key="cn_nav_dash"):
         go("dashboard"); rerun()
-    if n2.button("📦 الأوردرات", use_container_width=True):
+    if n2.button("📦 الأوردرات", use_container_width=True, key="cn_nav_ord"):
         go("orders"); rerun()
-    if n3.button("📈 التقارير", use_container_width=True):
+    if n3.button("📈 التقارير", use_container_width=True, key="cn_nav_rep"):
         go("reports"); rerun()
+    if n4.button("🔄 تحديث", use_container_width=True, key="cn_nav_ref"):
+        st.cache_data.clear(); rerun()
 st.divider()
 
 
