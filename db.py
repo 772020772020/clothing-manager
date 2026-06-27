@@ -12,7 +12,7 @@ from calculations import calc_item
 ITEM_STATUSES = [
     "Order Registered", "Purchased From China", "In Transit",
     "Awaiting Weight", "In Warehouse", "Out For Delivery",
-    "Delivered", "Out of Stock",
+    "Delivered", "Ready For Sale", "Out of Stock",
 ]
 STATUS_AR = {
     "Order Registered": "تم التسجيل",
@@ -22,16 +22,18 @@ STATUS_AR = {
     "In Warehouse": "في المستودع",
     "Out For Delivery": "مع شركة الشحن",
     "Delivered": "تم التسليم",
+    "Ready For Sale": "فوري (للبيع)",
     "Out of Stock": "نفذ من المصدر",
 }
 
 # ===== نظام أمريكا (حساب مبسّط: الربح = البيع − التكلفة) =====
-USA_STATUSES = ["In Transit", "In Warehouse", "Out For Delivery", "Delivered"]
+USA_STATUSES = ["In Transit", "In Warehouse", "Out For Delivery", "Delivered", "Ready For Sale"]
 USA_STATUS_AR = {
     "In Transit": "في الطريق",
     "In Warehouse": "في المستودع",
     "Out For Delivery": "مع شركة الشحن",
     "Delivered": "تم التسليم",
+    "Ready For Sale": "فوري (للبيع)",
 }
 
 
@@ -136,7 +138,7 @@ class Database:
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit
-            FROM items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled')
+            FROM items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
         """, (oid,), fetch="one")
 
     # ---------- قطع ----------
@@ -196,7 +198,7 @@ class Database:
         return self._exec("""SELECT i.*, o.order_number FROM items i
             JOIN orders o ON o.id=i.order_id
             WHERE i.weight_date=%s AND i.weight_grams>0
-              AND i.status NOT IN ('Out of Stock','Cancelled')
+              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
             ORDER BY o.order_number, i.id""", (day,), fetch="all")
 
     def items_of_customer(self, customer):
@@ -248,7 +250,7 @@ class Database:
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit,
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
-            FROM items WHERE status NOT IN ('Out of Stock','Cancelled')
+            FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
         """, fetch="one")
         sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
         sc = {row["status"]: row["c"] for row in sc_rows}
@@ -268,7 +270,7 @@ class Database:
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
             FROM orders o LEFT JOIN items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled')
+                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
             GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
 
     def report_by_customer(self):
@@ -278,7 +280,7 @@ class Database:
             COALESCE(SUM(deposit_paid),0) deposits,
             COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
             COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit
-            FROM items WHERE status NOT IN ('Out of Stock','Cancelled')
+            FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
             GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
     def report_monthly(self):
@@ -287,7 +289,7 @@ class Database:
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
             FROM orders o LEFT JOIN items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled')
+                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def report_yearly(self):
@@ -296,7 +298,7 @@ class Database:
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
             FROM orders o LEFT JOIN items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled')
+                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def all_items_detailed(self):
@@ -367,7 +369,7 @@ class Database:
                 COALESCE(SUM(deposit_paid),0) deposits,
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
                 COALESCE(SUM(profit_egp),0) profit
-            FROM usa_items WHERE order_id=%s
+            FROM usa_items WHERE order_id=%s AND status <> 'Ready For Sale'
         """, (oid,), fetch="one")
 
     # ---------- قطع أمريكا ----------
@@ -412,7 +414,7 @@ class Database:
                 COALESCE(SUM(cost_egp),0) cost,
                 COALESCE(SUM(profit_egp),0) profit,
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
-            FROM usa_items
+            FROM usa_items WHERE status <> 'Ready For Sale'
         """, fetch="one")
         return {
             "orders": orders, "pieces": r["pieces"], "sales": r["sales"],
@@ -426,6 +428,7 @@ class Database:
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(i.profit_egp),0) profit
             FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
+                AND i.status <> 'Ready For Sale'
             GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
 
     def usa_report_by_customer(self):
@@ -435,7 +438,8 @@ class Database:
             COALESCE(SUM(deposit_paid),0) deposits,
             COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
             COALESCE(SUM(profit_egp),0) profit
-            FROM usa_items GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
+            FROM usa_items WHERE status <> 'Ready For Sale'
+            GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
     def usa_report_monthly(self):
         return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
@@ -443,6 +447,7 @@ class Database:
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(i.profit_egp),0) profit
             FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
+                AND i.status <> 'Ready For Sale'
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def usa_report_yearly(self):
@@ -451,4 +456,5 @@ class Database:
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(i.profit_egp),0) profit
             FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
+                AND i.status <> 'Ready For Sale'
             GROUP BY period ORDER BY period DESC""", fetch="all")
