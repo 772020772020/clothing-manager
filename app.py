@@ -71,6 +71,22 @@ def egp(v):
         return "0.00 ج.م"
 
 
+def _china_profit_disp(it):
+    """نص عمود الربح لقطعة صيني (يراعي الفوري وانتظار الوزن)."""
+    if it["status"] == "Ready For Sale":
+        return "فوري (لسه)"
+    if it["weight_grams"] <= 0:
+        return "انتظار الوزن"
+    return egp(it["profit_egp"])
+
+
+def _usa_profit_disp(it):
+    """نص عمود الربح لقطعة أمريكا (يراعي الفوري)."""
+    if it["status"] == "Ready For Sale":
+        return "فوري (لسه)"
+    return egp(it["profit_egp"])
+
+
 def _is_loss(text):
     """يتحقق لو القيمة في عمود الربح خسارة (سالبة)."""
     s = str(text)
@@ -178,8 +194,8 @@ def _render_customer_search(key_prefix):
     if not chosen_cust:
         return
     citems = db.items_of_customer(chosen_cust)
-    # نستبعد القطع المرتجعة من كل الحسابات
-    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled")]
+    # نستبعد القطع المرتجعة والفوري (غير المباعة) من كل الحسابات
+    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale")]
     tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
     tot_dep = sum(it["deposit_paid"] or 0 for it in active)
     tot_bal = tot_sales - tot_dep
@@ -195,7 +211,7 @@ def _render_customer_search(key_prefix):
 
     cdata = []
     for it in citems:
-        profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
+        profit = _china_profit_disp(it)
         cdata.append({
             "رقم الأوردر": it["order_number"],
             "المنتج": it["product_name"],
@@ -249,7 +265,7 @@ def view_dashboard():
         # جدول سريع للقطع
         tbl = []
         for it in status_items:
-            profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
+            profit = _china_profit_disp(it)
             tbl.append({
                 "أوردر": it["order_number"],
                 "العميل": it["customer_name"],
@@ -402,7 +418,7 @@ def view_order_details():
     if items:
         data = []
         for it in items:
-            profit = "انتظار الوزن" if it["weight_grams"] <= 0 else egp(it["profit_egp"])
+            profit = _china_profit_disp(it)
             data.append({
                 "العميل": it["customer_name"],
                 "المنتج": it["product_name"],
@@ -667,7 +683,10 @@ def _usa_item_form(oid, item, form_key):
                           format_func=lambda s: USA_STATUS_AR.get(s, s), key=f"{k}_status")
     # معاينة الربح
     profit = (sell or 0) - (cost or 0)
-    st.caption(f"💰 الربح المتوقع: {egp(profit)}  |  المتبقي على العميل: {egp((sell or 0) - (deposit or 0))}")
+    if status == "Ready For Sale":
+        st.caption("🏷️ فوري (للبيع): مش محسوب في الأرباح ولا الخسائر لحد ما يتباع. سيبه فوري لحد ما تبيعه، وبعدين غيّر الحالة واكتب سعر البيع.")
+    else:
+        st.caption(f"💰 الربح المتوقع: {egp(profit)}  |  المتبقي على العميل: {egp((sell or 0) - (deposit or 0))}")
 
     if st.button("💾 حفظ", type="primary", key=f"{k}_save"):
         if not customer.strip() and not product.strip():
@@ -731,12 +750,13 @@ def _render_usa_customer_search(key_prefix):
     if not chosen:
         return
     citems = db.usa_items_of_customer(chosen)
-    tot_sales = sum(it["selling_price_egp"] or 0 for it in citems)
-    tot_cost = sum(it["cost_egp"] or 0 for it in citems)
-    tot_dep = sum(it["deposit_paid"] or 0 for it in citems)
-    tot_profit = sum(it["profit_egp"] or 0 for it in citems)
+    active = [it for it in citems if it["status"] != "Ready For Sale"]
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
+    tot_cost = sum(it["cost_egp"] or 0 for it in active)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in active)
+    tot_profit = sum(it["profit_egp"] or 0 for it in active)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("عدد القطع", len(citems))
+    m1.metric("عدد القطع", len(active))
     m2.metric("إجمالي البيع", egp(tot_sales))
     m3.metric("المدفوع (عربون)", egp(tot_dep))
     m4.metric("المتبقي عليه", egp(tot_sales - tot_dep))
@@ -752,7 +772,7 @@ def _render_usa_customer_search(key_prefix):
             "العربون": egp(it["deposit_paid"]),
             "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
             "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
-            "الربح": egp(it["profit_egp"]),
+            "الربح": _usa_profit_disp(it),
         })
     st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
 
@@ -836,7 +856,7 @@ def view_usa_order_details():
                 "العربون": egp(it["deposit_paid"]),
                 "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
                 "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
-                "الربح": egp(it["profit_egp"]),
+                "الربح": _usa_profit_disp(it),
             })
         st.dataframe(_style_profit(pd.DataFrame(data)), use_container_width=True, hide_index=True)
 
