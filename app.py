@@ -10,7 +10,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-from db import Database, ITEM_STATUSES, STATUS_AR
+from db import Database, ITEM_STATUSES, STATUS_AR, USA_STATUSES, USA_STATUS_AR
 from calculations import calc_item, payment_status, remaining_balance
 
 # ============================================================
@@ -51,6 +51,17 @@ def get_db():
     return Database(cfg)
 
 db = get_db()
+
+# إنشاء جداول أمريكا تلقائياً لو مش موجودة (مرة واحدة)
+@st.cache_resource
+def _ensure_usa_tables():
+    try:
+        db.usa_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جداول أمريكا تلقائياً ({e}).")
+    return True
+
+_ensure_usa_tables()
 
 
 def egp(v):
@@ -110,16 +121,36 @@ def go(view, order_id=None):
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
 st.markdown("#### 🧵 إدارة الملابس المستوردة")
-nav1, nav2, nav3, nav4 = st.columns(4)
-if nav1.button("📊 لوحة المعلومات", use_container_width=True):
+
+USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
+in_usa = st.session_state.get("view", "dashboard") in USA_VIEWS
+
+# سطر تبديل النظام (الصين / أمريكا) + تحديث
+s1, s2, s3 = st.columns(3)
+if s1.button(("🟢 " if not in_usa else "") + "🇨🇳 الصين", use_container_width=True):
     go("dashboard"); rerun()
-if nav2.button("📦 الأوردرات", use_container_width=True):
-    go("orders"); rerun()
-if nav3.button("📈 التقارير", use_container_width=True):
-    go("reports"); rerun()
-if nav4.button("🔄 تحديث", use_container_width=True):
-    st.cache_data.clear()
-    rerun()
+if s2.button(("🟢 " if in_usa else "") + "🇺🇸 أمريكا", use_container_width=True):
+    go("usa_dashboard"); rerun()
+if s3.button("🔄 تحديث", use_container_width=True):
+    st.cache_data.clear(); rerun()
+
+# سطر أقسام النظام الحالي
+if in_usa:
+    n1, n2, n3 = st.columns(3)
+    if n1.button("📊 لوحة أمريكا", use_container_width=True):
+        go("usa_dashboard"); rerun()
+    if n2.button("📦 أوردرات أمريكا", use_container_width=True):
+        go("usa_orders"); rerun()
+    if n3.button("📈 تقارير أمريكا", use_container_width=True):
+        go("usa_reports"); rerun()
+else:
+    n1, n2, n3 = st.columns(3)
+    if n1.button("📊 لوحة المعلومات", use_container_width=True):
+        go("dashboard"); rerun()
+    if n2.button("📦 الأوردرات", use_container_width=True):
+        go("orders"); rerun()
+    if n3.button("📈 التقارير", use_container_width=True):
+        go("reports"); rerun()
 st.divider()
 
 
@@ -610,6 +641,270 @@ def _build_excel():
 
 
 # ============================================================
+#  نظام أمريكا (واجهات منفصلة)
+# ============================================================
+def _usa_item_form(oid, item, form_key):
+    """نموذج إضافة/تعديل قطعة أمريكا (حساب مبسّط: ربح = بيع − تكلفة)."""
+    is_edit = item is not None
+    k = form_key
+    c1, c2 = st.columns(2)
+    customer = c1.text_input("اسم العميل", value=item["customer_name"] if is_edit else "", key=f"{k}_cust")
+    product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        cost = _num("تكلفة الأوردر (ج.م)", item["cost_egp"] if is_edit else 0, key=f"{k}_cost")
+    with c4:
+        sell = _num("سعر البيع (ج.م)", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+    with c5:
+        deposit = _num("العربون (ج.م)", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+    cur_status = item["status"] if is_edit else "In Transit"
+    status = st.selectbox("الحالة", USA_STATUSES,
+                          index=USA_STATUSES.index(cur_status) if cur_status in USA_STATUSES else 0,
+                          format_func=lambda s: USA_STATUS_AR.get(s, s), key=f"{k}_status")
+    # معاينة الربح
+    profit = (sell or 0) - (cost or 0)
+    st.caption(f"💰 الربح المتوقع: {egp(profit)}  |  المتبقي على العميل: {egp((sell or 0) - (deposit or 0))}")
+
+    if st.button("💾 حفظ", type="primary", key=f"{k}_save"):
+        if not customer.strip() and not product.strip():
+            st.error("اكتب اسم العميل أو المنتج على الأقل.")
+        else:
+            if is_edit:
+                db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status)
+                st.success("تم تعديل القطعة.")
+            else:
+                db.usa_add_item(oid, customer, product, cost, sell, deposit, status)
+                st.success("تم إضافة القطعة.")
+            rerun()
+
+
+def view_usa_dashboard():
+    st.header("📊 لوحة معلومات أمريكا")
+    d = db.usa_dashboard()
+    a, b, c, e = st.columns(4)
+    a.metric("عدد الأوردرات", d["orders"])
+    b.metric("عدد القطع", d["pieces"])
+    c.metric("إجمالي المبيعات", egp(d["sales"]))
+    e.metric("صافي الربح", egp(d["profit"]))
+    a2, b2 = st.columns(2)
+    a2.metric("إجمالي التكاليف", egp(d["cost"]))
+    b2.metric("المتبقي على العملاء", egp(d["outstanding"]))
+
+    st.divider()
+    st.subheader("👤 بحث عن عميل (أمريكا)")
+    _render_usa_customer_search("usa_dash")
+
+    st.divider()
+    st.subheader("آخر أوردرات أمريكا")
+    orders = db.usa_all_orders()
+    if orders:
+        data = []
+        for o in orders[:10]:
+            summ = db.usa_order_summary(o["id"])
+            data.append({
+                "رقم الأوردر": o["order_number"],
+                "المورد": o["supplier_name"],
+                "التاريخ": o["order_date"],
+                "عدد القطع": summ["pieces"],
+                "صافي الربح": egp(summ["profit"]),
+            })
+        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+    else:
+        st.info("لا توجد أوردرات أمريكا بعد. أضف من صفحة الأوردرات.")
+
+
+def _render_usa_customer_search(key_prefix):
+    search = st.text_input("اكتب اسم العميل (أو جزء منه)", key=f"{key_prefix}_search")
+    custs = db.usa_customers_list()
+    matches = [c for c in custs if search.strip().lower() in c.lower()] if search.strip() else custs
+    if not custs:
+        st.info("لا يوجد عملاء بعد.")
+        return
+    if not matches:
+        st.warning("لا يوجد عميل بهذا الاسم.")
+        return
+    chosen = st.selectbox("اختر العميل", matches, key=f"{key_prefix}_cust")
+    if not chosen:
+        return
+    citems = db.usa_items_of_customer(chosen)
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in citems)
+    tot_cost = sum(it["cost_egp"] or 0 for it in citems)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in citems)
+    tot_profit = sum(it["profit_egp"] or 0 for it in citems)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("عدد القطع", len(citems))
+    m2.metric("إجمالي البيع", egp(tot_sales))
+    m3.metric("المدفوع (عربون)", egp(tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_sales - tot_dep))
+    m5.metric("صافي الربح", egp(tot_profit))
+    cdata = []
+    for it in citems:
+        cdata.append({
+            "رقم الأوردر": it["order_number"],
+            "المورد": it["supplier_name"],
+            "المنتج": it["product_name"],
+            "التكلفة": egp(it["cost_egp"]),
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+            "الربح": egp(it["profit_egp"]),
+        })
+    st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+
+
+def view_usa_orders():
+    st.header("📦 أوردرات أمريكا")
+    with st.expander("➕ إضافة أوردر جديد", expanded=False):
+        col1, col2 = st.columns(2)
+        number = col1.text_input("رقم الأوردر", key="usa_no_num")
+        order_date = col2.date_input("تاريخ الأوردر", value=date.today(), key="usa_no_date")
+        supplier = st.text_input("اسم المورد", key="usa_no_supplier")
+        notes = st.text_input("ملاحظات", key="usa_no_notes")
+        if st.button("حفظ الأوردر", type="primary", key="usa_no_save"):
+            if not number.strip():
+                st.error("اكتب رقم الأوردر.")
+            else:
+                db.usa_create_order(number.strip(), order_date.isoformat(), supplier.strip(), notes)
+                st.success("تم إضافة الأوردر.")
+                rerun()
+
+    search = st.text_input("🔍 ابحث برقم الأوردر أو المورد", "", key="usa_search")
+    orders = db.usa_all_orders()
+    if search.strip():
+        k = search.strip().lower()
+        orders = [o for o in orders if k in o["order_number"].lower()
+                  or k in (o["supplier_name"] or "").lower() or k in o["order_date"]]
+    if not orders:
+        st.info("لا توجد أوردرات.")
+        return
+    for o in orders:
+        summ = db.usa_order_summary(o["id"])
+        with st.container(border=True):
+            cols = st.columns([2, 2, 1, 2, 2])
+            cols[0].markdown(f"**رقم:** {o['order_number']}")
+            cols[1].markdown(f"**المورد:** {o['supplier_name'] or '—'}")
+            cols[2].markdown(f"**القطع:** {summ['pieces']}")
+            cols[3].markdown(f"**الربح:** {egp(summ['profit'])}")
+            if cols[4].button("📂 فتح التفاصيل", key=f"usa_open_{o['id']}"):
+                go("usa_order_details", o["id"]); rerun()
+
+
+def view_usa_order_details():
+    oid = st.session_state.order_id
+    o = db.usa_get_order(oid)
+    if not o:
+        st.error("الأوردر غير موجود.")
+        if st.button("رجوع"):
+            go("usa_orders"); rerun()
+        return
+    cback, ctitle = st.columns([1, 4])
+    if cback.button("← رجوع للأوردرات"):
+        go("usa_orders"); rerun()
+    ctitle.header(f"أوردر أمريكا: {o['order_number']} • {o['order_date']}")
+
+    # معلومات الأوردر
+    with st.container(border=True):
+        st.subheader("معلومات الأوردر")
+        c1, c2 = st.columns(2)
+        new_num = c1.text_input("رقم الأوردر", value=o["order_number"], key=f"usa_num_{oid}")
+        new_supplier = c2.text_input("اسم المورد", value=o["supplier_name"] or "", key=f"usa_sup_{oid}")
+        new_notes = st.text_area("📝 ملاحظات", value=o["notes"] or "", key=f"usa_notes_{oid}")
+        if st.button("💾 حفظ معلومات الأوردر", type="primary", key=f"usa_savord_{oid}"):
+            db.usa_update_order(oid, new_num.strip() or o["order_number"], o["order_date"],
+                                new_supplier.strip(), new_notes)
+            st.success("تم الحفظ.")
+            rerun()
+
+    with st.expander("➕ إضافة قطعة جديدة", expanded=False):
+        _usa_item_form(oid, item=None, form_key="usa_add_item")
+
+    st.subheader("القطع داخل الأوردر")
+    items = db.usa_items_of(oid)
+    if items:
+        data = []
+        for it in items:
+            data.append({
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "التكلفة": egp(it["cost_egp"]),
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "العربون": egp(it["deposit_paid"]),
+                "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+                "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+                "الربح": egp(it["profit_egp"]),
+            })
+        st.dataframe(_style_profit(pd.DataFrame(data)), use_container_width=True, hide_index=True)
+
+        st.markdown("##### تعديل أو حذف قطعة")
+        opts = {f'{it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it["id"] for it in items}
+        chosen = st.selectbox("اختر قطعة", list(opts.keys()), key=f"usa_pick_{oid}")
+        chosen_id = opts[chosen]
+        cedit, cdel = st.columns(2)
+        chosen_item = next(it for it in items if it["id"] == chosen_id)
+        with cedit.expander("✏️ تعديل القطعة المختارة"):
+            _usa_item_form(oid, item=chosen_item, form_key=f"usa_edit_{chosen_id}")
+        if cdel.button("🗑️ حذف القطعة المختارة", key=f"usa_del_{oid}"):
+            db.usa_delete_item(chosen_id)
+            st.success("تم الحذف.")
+            rerun()
+    else:
+        st.info("لا توجد قطع. أضف قطعة من الأعلى.")
+
+    s = db.usa_order_summary(oid)
+    st.divider()
+    st.subheader("الإجماليات")
+    t1, t2, t3, t4, t5 = st.columns(5)
+    t1.metric("عدد القطع", s["pieces"])
+    t2.metric("إجمالي التكلفة", egp(s["cost"]))
+    t3.metric("إجمالي المبيعات", egp(s["sales"]))
+    t4.metric("الودائع المجمّعة", egp(s["deposits"]))
+    t5.metric("صافي الربح", egp(s["profit"]))
+
+
+def view_usa_reports():
+    st.header("📈 تقارير أمريكا")
+    tab1, tab2, tab3, tab4 = st.tabs(["أرباح الأوردرات", "أرباح العملاء", "أرباح شهرية", "أرباح سنوية"])
+    with tab1:
+        rows = db.usa_report_by_order()
+        df = pd.DataFrame([{
+            "رقم الأوردر": r["order_number"], "المورد": r["supplier_name"],
+            "التاريخ": r["order_date"], "عدد القطع": r["pieces"],
+            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
+            "الربح": round(r["profit"], 2),
+        } for r in rows])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    with tab2:
+        rows = db.usa_report_by_customer()
+        df = pd.DataFrame([{
+            "اسم العميل": r["customer_name"], "عدد القطع": r["pieces"],
+            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
+            "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
+            "الربح": round(r["profit"], 2),
+        } for r in rows])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.divider()
+        st.markdown("##### 🔍 بحث عن عميل بالاسم")
+        _render_usa_customer_search("usa_rep")
+    with tab3:
+        rows = db.usa_report_monthly()
+        df = pd.DataFrame([{
+            "الشهر": r["period"], "عدد القطع": r["pieces"],
+            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
+            "الربح": round(r["profit"], 2),
+        } for r in rows])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    with tab4:
+        rows = db.usa_report_yearly()
+        df = pd.DataFrame([{
+            "السنة": r["period"], "عدد القطع": r["pieces"],
+            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
+            "الربح": round(r["profit"], 2),
+        } for r in rows])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ============================================================
 #  التوجيه
 # ============================================================
 view = st.session_state.view
@@ -621,3 +916,11 @@ elif view == "order_details":
     view_order_details()
 elif view == "reports":
     view_reports()
+elif view == "usa_dashboard":
+    view_usa_dashboard()
+elif view == "usa_orders":
+    view_usa_orders()
+elif view == "usa_order_details":
+    view_usa_order_details()
+elif view == "usa_reports":
+    view_usa_reports()
