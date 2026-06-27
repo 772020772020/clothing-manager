@@ -175,22 +175,15 @@ st.divider()
 
 
 def _render_customer_search(key_prefix):
-    """خانة بحث باسم العميل + ملخصه وكل قطعه. تُستخدم في أكثر من صفحة."""
-    search = st.text_input("اكتب اسم العميل (أو جزء منه)", key=f"{key_prefix}_search")
+    """اختيار عميل (قابل للبحث بالكتابة) + ملخصه وكل قطعه."""
     custs = db.customers_list()
-    if search.strip():
-        matches = [c for c in custs if search.strip().lower() in c.lower()]
-    else:
-        matches = custs
-
     if not custs:
         st.info("لا يوجد عملاء بعد.")
         return
-    if not matches:
-        st.warning("لا يوجد عميل بهذا الاسم.")
-        return
-
-    chosen_cust = st.selectbox("اختر العميل", matches, key=f"{key_prefix}_cust")
+    chosen_cust = st.selectbox(
+        "اكتب أول حروف اسم العميل ثم اختر",
+        custs, index=None, placeholder="ابدأ الكتابة للبحث...",
+        key=f"{key_prefix}_cust")
     if not chosen_cust:
         return
     citems = db.items_of_customer(chosen_cust)
@@ -224,6 +217,21 @@ def _render_customer_search(key_prefix):
             "الربح": profit,
         })
     st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+
+    # تغيير حالة قطعة مباشرة من هنا
+    st.markdown("##### 🔄 تغيير حالة قطعة")
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({STATUS_AR.get(it["status"], it["status"])})': it
+            for it in citems}
+    if opts:
+        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_statpick")
+        it = opts[pick]
+        new_status = st.selectbox("الحالة الجديدة", ITEM_STATUSES,
+                                  index=ITEM_STATUSES.index(it["status"]) if it["status"] in ITEM_STATUSES else 0,
+                                  format_func=lambda s: STATUS_AR.get(s, s), key=f"{key_prefix}_newstat")
+        if st.button("💾 حفظ الحالة", key=f"{key_prefix}_savestat"):
+            db.update_item_status(it["id"], new_status)
+            st.success("تم تغيير الحالة.")
+            rerun()
 
 
 # ============================================================
@@ -737,16 +745,14 @@ def view_usa_dashboard():
 
 
 def _render_usa_customer_search(key_prefix):
-    search = st.text_input("اكتب اسم العميل (أو جزء منه)", key=f"{key_prefix}_search")
     custs = db.usa_customers_list()
-    matches = [c for c in custs if search.strip().lower() in c.lower()] if search.strip() else custs
     if not custs:
         st.info("لا يوجد عملاء بعد.")
         return
-    if not matches:
-        st.warning("لا يوجد عميل بهذا الاسم.")
-        return
-    chosen = st.selectbox("اختر العميل", matches, key=f"{key_prefix}_cust")
+    chosen = st.selectbox(
+        "اكتب أول حروف اسم العميل ثم اختر",
+        custs, index=None, placeholder="ابدأ الكتابة للبحث...",
+        key=f"{key_prefix}_cust")
     if not chosen:
         return
     citems = db.usa_items_of_customer(chosen)
@@ -775,6 +781,21 @@ def _render_usa_customer_search(key_prefix):
             "الربح": _usa_profit_disp(it),
         })
     st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+
+    # تغيير حالة قطعة مباشرة من هنا
+    st.markdown("##### 🔄 تغيير حالة قطعة")
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({USA_STATUS_AR.get(it["status"], it["status"])})': it
+            for it in citems}
+    if opts:
+        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_statpick")
+        it = opts[pick]
+        new_status = st.selectbox("الحالة الجديدة", USA_STATUSES,
+                                  index=USA_STATUSES.index(it["status"]) if it["status"] in USA_STATUSES else 0,
+                                  format_func=lambda s: USA_STATUS_AR.get(s, s), key=f"{key_prefix}_newstat")
+        if st.button("💾 حفظ الحالة", key=f"{key_prefix}_savestat"):
+            db.usa_update_item_status(it["id"], new_status)
+            st.success("تم تغيير الحالة.")
+            rerun()
 
 
 def view_usa_orders():
