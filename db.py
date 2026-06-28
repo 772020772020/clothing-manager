@@ -333,6 +333,38 @@ class Database:
             profit_egp DOUBLE PRECISION DEFAULT 0,
             status TEXT DEFAULT 'In Transit'
         )""")
+        # جدول المصاريف العامة (تخص الصين وأمريكا معاً)
+        self._exec("""CREATE TABLE IF NOT EXISTS expenses (
+            id SERIAL PRIMARY KEY,
+            exp_date TEXT NOT NULL,
+            name TEXT DEFAULT '',
+            amount DOUBLE PRECISION DEFAULT 0,
+            notes TEXT DEFAULT ''
+        )""")
+
+    # ---------- المصاريف العامة ----------
+    def add_expense(self, exp_date, name, amount, notes=""):
+        return self._exec(
+            "INSERT INTO expenses (exp_date, name, amount, notes) VALUES (%s,%s,%s,%s) RETURNING id",
+            (exp_date, name, amount, notes), fetch="id")
+
+    def delete_expense(self, eid):
+        self._exec("DELETE FROM expenses WHERE id=%s", (eid,))
+
+    def all_expenses(self):
+        return self._exec("SELECT * FROM expenses ORDER BY exp_date::date DESC, id DESC", fetch="all")
+
+    def expenses_total(self):
+        r = self._exec("SELECT COALESCE(SUM(amount),0) t FROM expenses", fetch="one")
+        return r["t"] if r else 0
+
+    def expenses_by_month(self):
+        return self._exec("""SELECT TO_CHAR(exp_date::date,'YYYY-MM') period,
+            COALESCE(SUM(amount),0) total FROM expenses GROUP BY period""", fetch="all")
+
+    def expenses_by_year(self):
+        return self._exec("""SELECT TO_CHAR(exp_date::date,'YYYY') period,
+            COALESCE(SUM(amount),0) total FROM expenses GROUP BY period""", fetch="all")
 
     # ---------- أوردرات أمريكا ----------
     def usa_create_order(self, number, date, supplier="", notes=""):
