@@ -237,6 +237,72 @@ def _render_customer_search(key_prefix):
 # ============================================================
 #  لوحة المعلومات
 # ============================================================
+def _render_expenses_manager(key_prefix):
+    """إدارة المصاريف العامة: إضافة + قائمة + حذف + إجمالي (مشتركة بين الصين وأمريكا)."""
+    st.markdown("##### ➕ إضافة مصروف")
+    c1, c2 = st.columns(2)
+    exp_date = c1.date_input("تاريخ المصروف", value=date.today(), key=f"{key_prefix}_exp_date")
+    name = c2.text_input("نوع/اسم المصروف", key=f"{key_prefix}_exp_name",
+                         placeholder="إيجار، شحن داخلي، كهربا...")
+    c3, c4 = st.columns(2)
+    amount = _num("المبلغ (ج.م)", 0, key=f"{key_prefix}_exp_amount")
+    notes = c4.text_input("ملاحظة (اختياري)", key=f"{key_prefix}_exp_notes")
+    if st.button("💾 حفظ المصروف", type="primary", key=f"{key_prefix}_exp_save"):
+        if not name.strip():
+            st.error("اكتب اسم المصروف.")
+        elif (amount or 0) <= 0:
+            st.error("اكتب مبلغ صحيح.")
+        else:
+            db.add_expense(exp_date.isoformat(), name.strip(), amount, notes)
+            st.success("تم حفظ المصروف.")
+            rerun()
+
+    st.divider()
+    exps = db.all_expenses()
+    total = db.expenses_total()
+    st.metric("💸 إجمالي المصاريف", egp(total))
+    if exps:
+        data = [{
+            "التاريخ": e["exp_date"], "المصروف": e["name"],
+            "المبلغ": egp(e["amount"]), "ملاحظة": e["notes"] or "",
+        } for e in exps]
+        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 🗑️ حذف مصروف")
+        opts = {f'{e["exp_date"]} — {e["name"]} ({egp(e["amount"])})': e["id"] for e in exps}
+        pick = st.selectbox("اختر المصروف للحذف", list(opts.keys()), key=f"{key_prefix}_exp_delpick")
+        if st.button("حذف المصروف المختار", key=f"{key_prefix}_exp_del"):
+            db.delete_expense(opts[pick])
+            st.success("تم الحذف.")
+            rerun()
+
+        # تفصيل شهري للمصاريف
+        st.markdown("##### 📅 المصاريف شهرياً")
+        m = db.expenses_by_month()
+        if m:
+            mdf = pd.DataFrame([{"الشهر": r["period"], "إجمالي المصاريف": round(r["total"], 2)} for r in m])
+            st.dataframe(mdf, use_container_width=True, hide_index=True)
+    else:
+        st.info("لا توجد مصاريف مسجلة بعد.")
+
+
+def _render_net_after_expenses():
+    """صافي الربح النهائي = ربح الصين + ربح أمريكا − إجمالي المصاريف."""
+    china = db.dashboard()
+    usa = db.usa_dashboard()
+    exp = db.expenses_total()
+    china_p = china["profit"]
+    usa_p = usa["profit"]
+    net = china_p + usa_p - exp
+    st.divider()
+    st.subheader("🧮 الحساب الإجمالي (الصين + أمريكا)")
+    a, b, c, d = st.columns(4)
+    a.metric("ربح الصين", egp(china_p))
+    b.metric("ربح أمريكا", egp(usa_p))
+    c.metric("إجمالي المصاريف", egp(exp))
+    d.metric("✅ الصافي النهائي", egp(net))
+
+
 def view_dashboard():
     st.header("📊 لوحة المعلومات")
     s = db.dashboard()
@@ -254,6 +320,8 @@ def view_dashboard():
     c8.metric("في المستودع", s["in_warehouse"])
     c9.metric("تم التسليم", s["delivered"])
     c10.metric("أرصدة مستحقة", egp(s["outstanding"]))
+
+    _render_net_after_expenses()
 
     st.divider()
     # استعراض القطع حسب الحالة + الدخول على أي قطعة وتعديلها
@@ -552,8 +620,8 @@ def _item_form(oid, item, form_key):
 def view_reports():
     st.header("📈 التقارير")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية", "💸 المصاريف"])
 
     with tab1:
         rows = db.report_by_order()
@@ -625,6 +693,10 @@ def view_reports():
             "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with tab6:
+        st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
+        _render_expenses_manager("cn_exp")
 
     st.divider()
     st.download_button("📥 تصدير كل التقارير Excel", data=_build_excel(),
@@ -720,6 +792,8 @@ def view_usa_dashboard():
     a2, b2 = st.columns(2)
     a2.metric("إجمالي التكاليف", egp(d["cost"]))
     b2.metric("المتبقي على العملاء", egp(d["outstanding"]))
+
+    _render_net_after_expenses()
 
     st.divider()
     st.subheader("👤 بحث عن عميل (أمريكا)")
@@ -909,7 +983,7 @@ def view_usa_order_details():
 
 def view_usa_reports():
     st.header("📈 تقارير أمريكا")
-    tab1, tab2, tab3, tab4 = st.tabs(["أرباح الأوردرات", "أرباح العملاء", "أرباح شهرية", "أرباح سنوية"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["أرباح الأوردرات", "أرباح العملاء", "أرباح شهرية", "أرباح سنوية", "💸 المصاريف"])
     with tab1:
         rows = db.usa_report_by_order()
         df = pd.DataFrame([{
@@ -947,6 +1021,9 @@ def view_usa_reports():
             "الربح": round(r["profit"], 2),
         } for r in rows])
         st.dataframe(df, use_container_width=True, hide_index=True)
+    with tab5:
+        st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
+        _render_expenses_manager("usa_exp")
 
 
 # ============================================================
