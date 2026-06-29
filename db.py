@@ -428,6 +428,17 @@ class Database:
     def usa_update_item_status(self, item_id, status):
         self._exec("UPDATE usa_items SET status=%s WHERE id=%s", (status, item_id))
 
+    def usa_items_by_status(self, status):
+        """كل قطع أمريكا في حالة معيّنة مع رقم الأوردر والمورد."""
+        return self._exec("""SELECT i.*, o.order_number, o.supplier_name FROM usa_items i
+            JOIN usa_orders o ON o.id=i.order_id
+            WHERE i.status=%s
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", (status,), fetch="all")
+
+    def usa_status_counts(self):
+        rows = self._exec("SELECT status, COUNT(*) c FROM usa_items GROUP BY status", fetch="all")
+        return {r["status"]: r["c"] for r in rows}
+
     def usa_items_of(self, order_id):
         return self._exec("SELECT * FROM usa_items WHERE order_id=%s ORDER BY id ASC",
                           (order_id,), fetch="all")
