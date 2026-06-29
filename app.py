@@ -796,7 +796,42 @@ def view_usa_dashboard():
     _render_net_after_expenses()
 
     st.divider()
-    st.subheader("👤 بحث عن عميل (أمريكا)")
+    # استعراض القطع حسب الحالة (نفس ترتيب الصين)
+    st.subheader("🔍 استعراض القطع حسب الحالة")
+    counts = db.usa_status_counts()
+    labels = [f"{USA_STATUS_AR[en]} ({counts.get(en, 0)})" for en in USA_STATUSES]
+    picked = st.selectbox("اختر الحالة لعرض قطعها", labels, key="usa_dash_status_filter")
+    picked_en = USA_STATUSES[labels.index(picked)]
+    status_items = db.usa_items_by_status(picked_en)
+    if status_items:
+        tbl = []
+        for it in status_items:
+            tbl.append({
+                "أوردر": it["order_number"],
+                "المورد": it["supplier_name"],
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "التكلفة": egp(it["cost_egp"]),
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "الربح": _usa_profit_disp(it),
+            })
+        st.dataframe(_style_profit(pd.DataFrame(tbl)), use_container_width=True, hide_index=True)
+        st.caption(f"عدد القطع في هذه الحالة: {len(status_items)}")
+
+        st.markdown("##### الدخول على قطعة وتعديلها")
+        opts = {
+            f'أوردر {it["order_number"]} — {it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it
+            for it in status_items
+        }
+        chosen_label = st.selectbox("اختر القطعة", list(opts.keys()), key="usa_dash_pick_item")
+        chosen_item = opts[chosen_label]
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"usa_dash_edit_{chosen_item['id']}")
+    else:
+        st.info("لا توجد قطع في هذه الحالة.")
+
+    st.divider()
+    st.subheader("👤 بحث عن عميل")
     _render_usa_customer_search("usa_dash")
 
     st.divider()
