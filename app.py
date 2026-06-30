@@ -479,6 +479,8 @@ def view_dashboard():
     c9.metric("تم التسليم", s["delivered"])
     c10.metric("أرصدة مستحقة", egp(s["outstanding"]))
 
+    st.info(f"🔮 الربح المتوقع للقطع التي لم تصل بعد (بتقدير وزن 500ج لكل قطعة): **{egp(s.get('expected_profit', 0))}** — تقدير فقط ولا يؤثر على أي حساب.")
+
     _render_net_after_expenses()
 
     st.divider()
@@ -811,7 +813,19 @@ def view_reports():
 
     with tab3:
         st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
-        chosen_day = st.date_input("اختر اليوم", value=date.today(), key="arr_day")
+        # قائمة سريعة بكل أيام الوصول (الأحدث أولاً) مع عدد القطع
+        dcounts = db.weight_dates_with_counts()
+        chosen_day = None
+        if dcounts:
+            day_opts = [f'{r["weight_date"]}  ({r["c"]} قطعة)' for r in dcounts]
+            day_vals = [r["weight_date"] for r in dcounts]
+            sel = st.selectbox("📅 أيام وصول الشحنات (اختر يوم)", ["— اختر من القائمة —"] + day_opts,
+                               key="arr_quick_day")
+            if sel != "— اختر من القائمة —":
+                chosen_day = date.fromisoformat(day_vals[day_opts.index(sel)])
+        manual_day = st.date_input("أو اختر اليوم يدوياً", value=date.today(), key="arr_day_manual")
+        if chosen_day is None:
+            chosen_day = manual_day
         day_str = chosen_day.isoformat()
         arr = db.items_by_weight_date(day_str)
         if arr:
