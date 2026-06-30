@@ -16,7 +16,7 @@ from calculations import calc_item, payment_status, remaining_balance
 # ============================================================
 #  إعداد الصفحة + RTL
 # ============================================================
-st.set_page_config(page_title="إدارة الملابس المستوردة", page_icon="🧵",
+st.set_page_config(page_title="Infinity Boutique Management", page_icon="🧵",
                    layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -45,6 +45,19 @@ st.markdown("""
 # ============================================================
 #  حماية بكلمة مرور
 # ============================================================
+import os as _os
+
+def _show_logo(width=180):
+    """يعرض اللوجو لو الملف موجود (logo.png بجوار app.py)."""
+    try:
+        if _os.path.exists("logo.png"):
+            c1, c2, c3 = st.columns([1, 2, 1])
+            with c2:
+                st.image("logo.png", width=width)
+    except Exception:
+        pass
+
+
 def _check_password():
     """يطلب كلمة المرور. كلمة المرور تُحفظ في إعدادات Streamlit (Secrets) باسم app_password."""
     correct = None
@@ -60,7 +73,8 @@ def _check_password():
     if st.session_state.get("auth_ok"):
         return True
 
-    st.markdown("### 🔒 برنامج إدارة الملابس المستوردة")
+    _show_logo(220)
+    st.markdown("### 🔒 Infinity Boutique Management")
     st.write("من فضلك أدخل كلمة المرور للدخول.")
     pw = st.text_input("كلمة المرور", type="password", key="login_pw")
     if st.button("دخول", type="primary", key="login_btn"):
@@ -235,7 +249,8 @@ if not _check_password():
 # ============================================================
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
-st.markdown("#### 🧵 إدارة الملابس المستوردة")
+_show_logo(140)
+st.markdown("#### 🧵 Infinity Boutique Management")
 
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 in_usa = st.session_state.get("view", "dashboard") in USA_VIEWS
