@@ -116,6 +116,71 @@ def rerun():
 
 
 # ============================================================
+#  صف الإجمالي تحت كل جدول
+# ============================================================
+import re as _re
+
+_TOTAL_SKIP = {"التاريخ", "الشهر", "السنة", "رقم الأوردر", "أوردر", "الحالة",
+               "المورد", "العميل", "المنتج", "اسم العميل", "المصروف", "ملاحظة", "ملاحظات"}
+
+
+def _to_number(v):
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).replace(",", "").strip()
+    if s == "":
+        return None
+    m = _re.match(r"^-?\d+(\.\d+)?$|^-?\d+(\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group())
+    except ValueError:
+        return None
+
+
+def _with_total(df):
+    """يضيف صف (الإجمالي) أسفل الجدول، يجمع كل عمود أرقام."""
+    if df is None or len(df) == 0:
+        return df
+    cols = list(df.columns)
+    total = {}
+    for i, c in enumerate(cols):
+        if i == 0:
+            total[c] = "الإجمالي"
+            continue
+        if c in _TOTAL_SKIP:
+            total[c] = ""
+            continue
+        cells = [x for x in df[c] if str(x).strip() != ""]
+        nums = [_to_number(x) for x in cells]
+        valid = [n for n in nums if n is not None]
+        if valid and len(valid) == len(cells):
+            s = sum(valid)
+            sample = str(df[c].iloc[0])
+            if "ج.م" in sample:
+                total[c] = f"{s:,.2f} ج.م"
+            elif "يوان" in sample:
+                total[c] = f"{s:g} يوان"
+            elif "." not in sample and s == int(s):
+                total[c] = f"{int(s)}"
+            else:
+                total[c] = f"{s:,.2f}"
+        else:
+            total[c] = ""
+    return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
+
+
+def show_df(df, style=False):
+    """يعرض جدول مع صف إجمالي تحته. style=True لتلوين الخسارة."""
+    df2 = _with_total(df)
+    if style:
+        st.dataframe(_style_profit(df2), use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(df2, use_container_width=True, hide_index=True)
+
+
+# ============================================================
 #  حالة التنقل
 # ============================================================
 if "view" not in st.session_state:
@@ -216,7 +281,7 @@ def _render_customer_search(key_prefix):
             "الحالة": STATUS_AR.get(it["status"], it["status"]),
             "الربح": profit,
         })
-    st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+    show_df(pd.DataFrame(cdata), style=True)
 
     # تعديل قطعة كاملة مباشرة من هنا
     st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
@@ -262,7 +327,7 @@ def _render_expenses_manager(key_prefix):
             "التاريخ": e["exp_date"], "المصروف": e["name"],
             "المبلغ": egp(e["amount"]), "ملاحظة": e["notes"] or "",
         } for e in exps]
-        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+        show_df(pd.DataFrame(data))
 
         st.markdown("##### 🗑️ حذف مصروف")
         opts = {f'{e["exp_date"]} — {e["name"]} ({egp(e["amount"])})': e["id"] for e in exps}
@@ -277,7 +342,7 @@ def _render_expenses_manager(key_prefix):
         m = db.expenses_by_month()
         if m:
             mdf = pd.DataFrame([{"الشهر": r["period"], "إجمالي المصاريف": round(r["total"], 2)} for r in m])
-            st.dataframe(mdf, use_container_width=True, hide_index=True)
+            show_df(mdf)
     else:
         st.info("لا توجد مصاريف مسجلة بعد.")
 
@@ -354,7 +419,7 @@ def view_dashboard():
                 "سعر البيع": egp(it["selling_price_egp"]),
                 "الربح": profit,
             })
-        st.dataframe(_style_profit(pd.DataFrame(tbl)), use_container_width=True, hide_index=True)
+        show_df(pd.DataFrame(tbl), style=True)
         st.caption(f"عدد القطع في هذه الحالة: {len(status_items)}")
 
         # الدخول على قطعة معيّنة وتعديلها بالكامل
@@ -389,7 +454,7 @@ def view_dashboard():
                 "عدد القطع": summ["pieces"],
                 "صافي الربح": egp(summ["profit"]),
             })
-        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+        show_df(pd.DataFrame(data))
     else:
         st.info("لا توجد أوردرات بعد. أضف أوردر جديد من صفحة الأوردرات.")
 
@@ -511,7 +576,7 @@ def view_order_details():
                 "الربح": profit,
             })
         df = pd.DataFrame(data)
-        st.dataframe(_style_profit(df), use_container_width=True, hide_index=True)
+        show_df(df, style=True)
 
         # تعديل / حذف قطعة
         st.markdown("##### تعديل أو حذف قطعة")
@@ -633,7 +698,7 @@ def view_reports():
             "إجمالي الشراء (يوان)": round(r["yuan_total"], 2),
             "المبيعات": round(r["sales"], 2), "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
 
     with tab2:
         rows = db.report_by_customer()
@@ -644,7 +709,7 @@ def view_reports():
             "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
 
         # 🔍 بحث باسم العميل وعرض كل بياناته
         st.divider()
@@ -677,7 +742,7 @@ def view_reports():
             m1.metric("عدد القطع الواصلة", len(arr))
             m2.metric("إجمالي مبيعاتها", egp(total_sales))
             m3.metric("إجمالي ربحها", egp(total_profit))
-            st.dataframe(_style_profit(pd.DataFrame(adata)), use_container_width=True, hide_index=True)
+            show_df(pd.DataFrame(adata), style=True)
         else:
             st.info("لا توجد قطع سُجّل وزنها في هذا اليوم.")
 
@@ -687,7 +752,7 @@ def view_reports():
             "الشهر": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
             "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
 
     with tab5:
         rows = db.report_yearly()
@@ -695,7 +760,7 @@ def view_reports():
             "السنة": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
             "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
 
     with tab6:
         st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
@@ -873,7 +938,7 @@ def view_usa_dashboard():
                 "سعر البيع": egp(it["selling_price_egp"]),
                 "الربح": _usa_profit_disp(it),
             })
-        st.dataframe(_style_profit(pd.DataFrame(tbl)), use_container_width=True, hide_index=True)
+        show_df(pd.DataFrame(tbl), style=True)
         st.caption(f"عدد القطع في هذه الحالة: {len(status_items)}")
 
         st.markdown("##### الدخول على قطعة وتعديلها")
@@ -906,7 +971,7 @@ def view_usa_dashboard():
                 "عدد القطع": summ["pieces"],
                 "صافي الربح": egp(summ["profit"]),
             })
-        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+        show_df(pd.DataFrame(data))
     else:
         st.info("لا توجد أوردرات أمريكا بعد. أضف من صفحة الأوردرات.")
 
@@ -947,7 +1012,7 @@ def _render_usa_customer_search(key_prefix):
             "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
             "الربح": _usa_profit_disp(it),
         })
-    st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
+    show_df(pd.DataFrame(cdata), style=True)
 
     # تعديل قطعة كاملة مباشرة من هنا
     st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
@@ -1041,7 +1106,7 @@ def view_usa_order_details():
                 "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
                 "الربح": _usa_profit_disp(it),
             })
-        st.dataframe(_style_profit(pd.DataFrame(data)), use_container_width=True, hide_index=True)
+        show_df(pd.DataFrame(data), style=True)
 
         st.markdown("##### تعديل أو حذف قطعة")
         opts = {f'{it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it["id"] for it in items}
@@ -1080,7 +1145,7 @@ def view_usa_reports():
             "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
     with tab2:
         rows = db.usa_report_by_customer()
         df = pd.DataFrame([{
@@ -1089,7 +1154,7 @@ def view_usa_reports():
             "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
         st.divider()
         st.markdown("##### 🔍 بحث عن عميل بالاسم")
         _render_usa_customer_search("usa_rep")
@@ -1100,7 +1165,7 @@ def view_usa_reports():
             "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
     with tab4:
         rows = db.usa_report_yearly()
         df = pd.DataFrame([{
@@ -1108,7 +1173,7 @@ def view_usa_reports():
             "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        show_df(df)
     with tab5:
         st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
         _render_expenses_manager("usa_exp")
