@@ -12,16 +12,13 @@ import streamlit as st
 
 from db import Database, ITEM_STATUSES, STATUS_AR, USA_STATUSES, USA_STATUS_AR
 from calculations import calc_item, payment_status, remaining_balance
+import storage
 
 # ============================================================
 #  إعداد الصفحة + RTL
 # ============================================================
-st.set_page_config(
-    page_title="Infinity Boutique Management",
-    page_icon="logo.png",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="Infinity Boutique Management", page_icon="🧵",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -226,6 +223,45 @@ def show_df(df, style=False):
         st.dataframe(_style_profit(df2), use_container_width=True, hide_index=True)
     else:
         st.dataframe(df2, use_container_width=True, hide_index=True)
+
+
+def _receipts_box(folder, title="📎 صور التحويلات", key=None):
+    """صندوق رفع وعرض صور (إيصالات/تحويلات) مرتبط بمجلد معيّن."""
+    k = key or folder
+    st.markdown(f"##### {title}")
+    if not storage.is_enabled():
+        st.info("خدمة تخزين الصور غير مفعّلة بعد. (تحتاج إضافة supabase_url و supabase_key في الإعدادات.)")
+        return
+    ups = st.file_uploader("ارفع صورة أو أكثر", type=["jpg", "jpeg", "png", "webp"],
+                           accept_multiple_files=True, key=f"{k}_uploader")
+    if ups and st.button("⬆️ رفع الصور", key=f"{k}_uploadbtn"):
+        ok = 0
+        for f in ups:
+            ct = f.type or "image/jpeg"
+            success, msg = storage.upload_image(folder, f.getvalue(), f.name, ct)
+            if success:
+                ok += 1
+            else:
+                st.error(msg)
+        if ok:
+            st.success(f"تم رفع {ok} صورة.")
+            rerun()
+
+    imgs = storage.list_images(folder)
+    if imgs:
+        st.caption(f"الصور المحفوظة ({len(imgs)}):")
+        cols = st.columns(3)
+        for i, (name, link) in enumerate(imgs):
+            with cols[i % 3]:
+                st.image(link, use_container_width=True)
+                if st.button("🗑️ حذف", key=f"{k}_del_{name}"):
+                    if storage.delete_image(folder, name):
+                        st.success("تم الحذف.")
+                        rerun()
+                    else:
+                        st.error("تعذّر الحذف.")
+    else:
+        st.caption("لا توجد صور بعد.")
 
 
 # ============================================================
@@ -605,6 +641,10 @@ def view_order_details():
             st.success("تم حفظ الملاحظة.")
             rerun()
 
+    # صور تحويلات فلوس العملاء لهذا الأوردر
+    with st.container(border=True):
+        _receipts_box(f"order_{oid}", title="📎 صور تحويلات العملاء", key=f"cn_rcpt_{oid}")
+
     # إضافة قطعة
     with st.expander("➕ إضافة قطعة جديدة", expanded=False):
         _item_form(oid, item=None, form_key="add_item")
@@ -798,6 +838,12 @@ def view_reports():
             show_df(pd.DataFrame(adata), style=True)
         else:
             st.info("لا توجد قطع سُجّل وزنها في هذا اليوم.")
+
+        # صور تحويلات الشحن لهذا اليوم (الميزان + الحساب + التحويل)
+        st.divider()
+        _receipts_box(f"shipping_{day_str}",
+                      title="🚚 صور الشحن لهذا اليوم (الميزان / الحساب / التحويل)",
+                      key=f"ship_{day_str}")
 
     with tab4:
         rows = db.report_monthly()
@@ -1140,6 +1186,10 @@ def view_usa_order_details():
                                 new_supplier.strip(), new_notes)
             st.success("تم الحفظ.")
             rerun()
+
+    # صور تحويلات فلوس العملاء لهذا الأوردر
+    with st.container(border=True):
+        _receipts_box(f"usa_order_{oid}", title="📎 صور تحويلات العملاء", key=f"usa_rcpt_{oid}")
 
     with st.expander("➕ إضافة قطعة جديدة", expanded=False):
         _usa_item_form(oid, item=None, form_key="usa_add_item")
