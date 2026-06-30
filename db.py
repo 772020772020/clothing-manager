@@ -443,6 +443,13 @@ class Database:
         return self._exec("SELECT * FROM usa_items WHERE order_id=%s ORDER BY id ASC",
                           (order_id,), fetch="all")
 
+    def usa_all_items_detailed(self):
+        return self._exec("""SELECT o.order_number, o.supplier_name, o.order_date,
+            i.customer_name, i.product_name, i.cost_egp, i.selling_price_egp,
+            i.deposit_paid, i.profit_egp, i.status
+            FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
+
     def usa_items_of_customer(self, name):
         return self._exec("""SELECT i.*, o.order_number, o.supplier_name FROM usa_items i
             JOIN usa_orders o ON o.id=i.order_id
