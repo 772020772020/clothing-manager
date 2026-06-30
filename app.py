@@ -16,8 +16,12 @@ from calculations import calc_item, payment_status, remaining_balance
 # ============================================================
 #  إعداد الصفحة + RTL
 # ============================================================
-st.set_page_config(page_title="Infinity Boutique Management", page_icon="🧵",
-                   layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="Infinity Boutique Management",
+    page_icon="logo.png",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 st.markdown("""
 <style>
