@@ -252,18 +252,38 @@ class Database:
                 COALESCE(SUM(selling_price_egp),0) sales,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit,
-                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
+                COALESCE(SUM(CASE WHEN status <> 'Delivered'
+                    THEN selling_price_egp-deposit_paid ELSE 0 END),0) outstanding
             FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
+        """, fetch="one")
+        # الربح المتوقع للقطع التي لم يصلها وزن بعد (تقدير وزن 500 جرام)
+        ep = self._exec("""
+            SELECT COALESCE(SUM(
+                i.selling_price_egp - (
+                    i.purchase_price_yuan * o.purchase_yuan_rate
+                    + 0.5 * o.shipping_price_per_kg_yuan * o.shipping_yuan_rate
+                )
+            ),0) expected
+            FROM items i JOIN orders o ON o.id=i.order_id
+            WHERE i.weight_grams<=0
+              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
         """, fetch="one")
         sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
         sc = {row["status"]: row["c"] for row in sc_rows}
         return {
             "orders": orders, "pieces": total_pieces, "awaiting": r["awaiting"] or 0,
             "sales": r["sales"], "cost": r["cost"], "profit": r["profit"],
-            "outstanding": r["outstanding"],
+            "outstanding": r["outstanding"], "expected_profit": ep["expected"],
             "in_transit": sc.get("In Transit", 0), "in_warehouse": sc.get("In Warehouse", 0),
             "delivered": sc.get("Delivered", 0),
         }
+
+    def weight_dates_with_counts(self):
+        """أيام الوصول (تسجيل الوزن) مع عدد القطع في كل يوم — للقائمة السريعة."""
+        return self._exec("""SELECT weight_date, COUNT(*) c FROM items
+            WHERE weight_date IS NOT NULL AND weight_grams>0
+              AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
+            GROUP BY weight_date ORDER BY weight_date DESC""", fetch="all")
 
     # ---------- تقارير ----------
     def report_by_order(self):
@@ -470,7 +490,8 @@ class Database:
                 COALESCE(SUM(selling_price_egp),0) sales,
                 COALESCE(SUM(cost_egp),0) cost,
                 COALESCE(SUM(profit_egp),0) profit,
-                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
+                COALESCE(SUM(CASE WHEN status <> 'Delivered'
+                    THEN selling_price_egp-deposit_paid ELSE 0 END),0) outstanding
             FROM usa_items WHERE status <> 'Ready For Sale'
         """, fetch="one")
         return {
