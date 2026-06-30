@@ -218,20 +218,16 @@ def _render_customer_search(key_prefix):
         })
     st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
 
-    # تغيير حالة قطعة مباشرة من هنا
-    st.markdown("##### 🔄 تغيير حالة قطعة")
-    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({STATUS_AR.get(it["status"], it["status"])})': it
+    # تعديل قطعة كاملة مباشرة من هنا
+    st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({STATUS_AR.get(it["status"], it["status"])})': it["id"]
             for it in citems}
     if opts:
-        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_statpick")
-        it = opts[pick]
-        new_status = st.selectbox("الحالة الجديدة", ITEM_STATUSES,
-                                  index=ITEM_STATUSES.index(it["status"]) if it["status"] in ITEM_STATUSES else 0,
-                                  format_func=lambda s: STATUS_AR.get(s, s), key=f"{key_prefix}_newstat")
-        if st.button("💾 حفظ الحالة", key=f"{key_prefix}_savestat"):
-            db.update_item_status(it["id"], new_status)
-            st.success("تم تغيير الحالة.")
-            rerun()
+        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
+        chosen_id = opts[pick]
+        chosen_item = db.get_item(chosen_id)
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_edit_{chosen_id}")
 
 
 # ============================================================
@@ -302,6 +298,14 @@ def _render_net_after_expenses():
     c.metric("إجمالي المصاريف", egp(exp))
     d.metric("✅ الصافي النهائي", egp(net))
 
+    st.download_button(
+        "📥 تحميل نسخة احتياطية (كل الداتا)",
+        data=_build_backup(),
+        file_name=f"نسخة-احتياطية-{date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="backup_btn", use_container_width=True)
+    st.caption("احفظ الملف على فلاشة أو جوجل درايف كل فترة كنسخة أمان.")
+
 
 def view_dashboard():
     st.header("📊 لوحة المعلومات")
@@ -327,14 +331,13 @@ def view_dashboard():
     # استعراض القطع حسب الحالة + الدخول على أي قطعة وتعديلها
     st.subheader("🔍 استعراض القطع حسب الحالة")
     status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
-    # نعرض عدّاد جنب كل حالة
+    # نعرض عدّاد جنب كل حالة (الاختيار يُخزَّن بالحالة نفسها ليبقى ثابتاً بعد الحفظ)
     counts = db.status_counts()
-    labels = []
-    for en in ITEM_STATUSES:
-        ar = STATUS_AR[en]
-        labels.append(f"{ar} ({counts.get(en, 0)})")
-    picked = st.selectbox("اختر الحالة لعرض قطعها", labels, key="dash_status_filter")
-    picked_en = ITEM_STATUSES[labels.index(picked)]
+    picked_en = st.selectbox(
+        "اختر الحالة لعرض قطعها",
+        ITEM_STATUSES,
+        format_func=lambda en: f"{STATUS_AR[en]} ({counts.get(en, 0)})",
+        key="dash_status_filter")
 
     status_items = db.items_by_status(picked_en)
     if status_items:
@@ -740,6 +743,59 @@ def _build_excel():
     return buf
 
 
+def _build_backup():
+    """نسخة احتياطية شاملة لكل الداتا (صين + أمريكا + مصاريف) في ملف Excel."""
+    buf = io.BytesIO()
+
+    # الصين — الأوردرات
+    cn_orders = pd.DataFrame([{
+        "رقم الأوردر": o["order_number"], "التاريخ": o["order_date"],
+        "سعر يوان الشراء": o["purchase_yuan_rate"], "سعر يوان الشحن": o["shipping_yuan_rate"],
+        "سعر كيلو الشحن (يوان)": o["shipping_price_per_kg_yuan"], "ملاحظات": o["notes"],
+    } for o in db.all_orders()])
+
+    # الصين — القطع
+    cn_items = pd.DataFrame([{
+        "رقم الأوردر": r["order_number"], "التاريخ": r["order_date"], "العميل": r["customer_name"],
+        "المنتج": r["product_name"], "سعر البيع": r["selling_price_egp"], "شراء (يوان)": r["purchase_price_yuan"],
+        "الوزن (جم)": r["weight_grams"], "العربون": r["deposit_paid"],
+        "الحالة": STATUS_AR.get(r["status"], r["status"]),
+        "تكلفة الشراء": r["purchase_cost_egp"], "تكلفة الشحن": r["shipping_cost_egp"],
+        "إجمالي التكلفة": r["total_cost_egp"], "الربح": r["profit_egp"],
+    } for r in db.all_items_detailed()])
+
+    # أمريكا — الأوردرات
+    usa_orders = pd.DataFrame([{
+        "رقم الأوردر": o["order_number"], "التاريخ": o["order_date"],
+        "المورد": o["supplier_name"], "ملاحظات": o["notes"],
+    } for o in db.usa_all_orders()])
+
+    # أمريكا — القطع
+    usa_items = pd.DataFrame([{
+        "رقم الأوردر": r["order_number"], "المورد": r["supplier_name"], "التاريخ": r["order_date"],
+        "العميل": r["customer_name"], "المنتج": r["product_name"], "التكلفة": r["cost_egp"],
+        "سعر البيع": r["selling_price_egp"], "العربون": r["deposit_paid"],
+        "الحالة": USA_STATUS_AR.get(r["status"], r["status"]), "الربح": r["profit_egp"],
+    } for r in db.usa_all_items_detailed()])
+
+    # المصاريف
+    exps = pd.DataFrame([{
+        "التاريخ": e["exp_date"], "المصروف": e["name"], "المبلغ": e["amount"], "ملاحظة": e["notes"],
+    } for e in db.all_expenses()])
+
+    def safe(df):
+        return df if not df.empty else pd.DataFrame({"لا توجد بيانات": []})
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        safe(cn_orders).to_excel(w, sheet_name="الصين - الأوردرات", index=False)
+        safe(cn_items).to_excel(w, sheet_name="الصين - القطع", index=False)
+        safe(usa_orders).to_excel(w, sheet_name="أمريكا - الأوردرات", index=False)
+        safe(usa_items).to_excel(w, sheet_name="أمريكا - القطع", index=False)
+        safe(exps).to_excel(w, sheet_name="المصاريف", index=False)
+    buf.seek(0)
+    return buf
+
+
 # ============================================================
 #  نظام أمريكا (واجهات منفصلة)
 # ============================================================
@@ -799,9 +855,11 @@ def view_usa_dashboard():
     # استعراض القطع حسب الحالة (نفس ترتيب الصين)
     st.subheader("🔍 استعراض القطع حسب الحالة")
     counts = db.usa_status_counts()
-    labels = [f"{USA_STATUS_AR[en]} ({counts.get(en, 0)})" for en in USA_STATUSES]
-    picked = st.selectbox("اختر الحالة لعرض قطعها", labels, key="usa_dash_status_filter")
-    picked_en = USA_STATUSES[labels.index(picked)]
+    picked_en = st.selectbox(
+        "اختر الحالة لعرض قطعها",
+        USA_STATUSES,
+        format_func=lambda en: f"{USA_STATUS_AR[en]} ({counts.get(en, 0)})",
+        key="usa_dash_status_filter")
     status_items = db.usa_items_by_status(picked_en)
     if status_items:
         tbl = []
@@ -891,20 +949,15 @@ def _render_usa_customer_search(key_prefix):
         })
     st.dataframe(_style_profit(pd.DataFrame(cdata)), use_container_width=True, hide_index=True)
 
-    # تغيير حالة قطعة مباشرة من هنا
-    st.markdown("##### 🔄 تغيير حالة قطعة")
+    # تعديل قطعة كاملة مباشرة من هنا
+    st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
     opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({USA_STATUS_AR.get(it["status"], it["status"])})': it
             for it in citems}
     if opts:
-        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_statpick")
-        it = opts[pick]
-        new_status = st.selectbox("الحالة الجديدة", USA_STATUSES,
-                                  index=USA_STATUSES.index(it["status"]) if it["status"] in USA_STATUSES else 0,
-                                  format_func=lambda s: USA_STATUS_AR.get(s, s), key=f"{key_prefix}_newstat")
-        if st.button("💾 حفظ الحالة", key=f"{key_prefix}_savestat"):
-            db.usa_update_item_status(it["id"], new_status)
-            st.success("تم تغيير الحالة.")
-            rerun()
+        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
+        chosen_item = opts[pick]
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_edit_{chosen_item['id']}")
 
 
 def view_usa_orders():
