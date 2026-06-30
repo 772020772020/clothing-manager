@@ -43,6 +43,36 @@ st.markdown("""
 
 
 # ============================================================
+#  حماية بكلمة مرور
+# ============================================================
+def _check_password():
+    """يطلب كلمة المرور. كلمة المرور تُحفظ في إعدادات Streamlit (Secrets) باسم app_password."""
+    correct = None
+    try:
+        correct = st.secrets["app_password"]
+    except Exception:
+        correct = None
+
+    # لو مفيش كلمة مرور متسجلة في الإعدادات، البرنامج يفتح عادي (بدون قفل)
+    if not correct:
+        return True
+
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.markdown("### 🔒 برنامج إدارة الملابس المستوردة")
+    st.write("من فضلك أدخل كلمة المرور للدخول.")
+    pw = st.text_input("كلمة المرور", type="password", key="login_pw")
+    if st.button("دخول", type="primary", key="login_btn"):
+        if pw == correct:
+            st.session_state.auth_ok = True
+            rerun()
+        else:
+            st.error("كلمة المرور غير صحيحة.")
+    return False
+
+
+# ============================================================
 #  اتصال قاعدة البيانات Supabase (cached)
 # ============================================================
 @st.cache_resource
@@ -196,8 +226,12 @@ def go(view, order_id=None):
 
 
 # ============================================================
-#  الشريط الجانبي
+#  بوابة كلمة المرور (تمنع كل شيء تحتها حتى الدخول)
 # ============================================================
+if not _check_password():
+    st.stop()
+
+
 # ============================================================
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
@@ -260,7 +294,7 @@ def _render_customer_search(key_prefix):
     tot_yuan = sum(it["purchase_price_yuan"] or 0 for it in active)
     tot_profit = sum((it["profit_egp"] or 0) for it in active if it["weight_grams"] > 0)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("عدد القطع", len(active))
+    m1.metric("عدد القطع", len(citems))
     m2.metric("إجمالي البيع", egp(tot_sales))
     m3.metric("المدفوع (عربون)", egp(tot_dep))
     m4.metric("المتبقي عليه", egp(tot_bal))
@@ -994,7 +1028,7 @@ def _render_usa_customer_search(key_prefix):
     tot_dep = sum(it["deposit_paid"] or 0 for it in active)
     tot_profit = sum(it["profit_egp"] or 0 for it in active)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("عدد القطع", len(active))
+    m1.metric("عدد القطع", len(citems))
     m2.metric("إجمالي البيع", egp(tot_sales))
     m3.metric("المدفوع (عربون)", egp(tot_dep))
     m4.metric("المتبقي عليه", egp(tot_sales - tot_dep))
