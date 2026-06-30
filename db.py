@@ -245,8 +245,9 @@ class Database:
     # ---------- لوحة المعلومات ----------
     def dashboard(self):
         orders = self._exec("SELECT COUNT(*) c FROM orders", fetch="one")["c"]
+        total_pieces = self._exec("SELECT COUNT(*) c FROM items", fetch="one")["c"]
         r = self._exec("""
-            SELECT COUNT(*) pieces,
+            SELECT
                 COALESCE(SUM(CASE WHEN weight_grams<=0 THEN 1 ELSE 0 END),0) awaiting,
                 COALESCE(SUM(selling_price_egp),0) sales,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
@@ -257,7 +258,7 @@ class Database:
         sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
         sc = {row["status"]: row["c"] for row in sc_rows}
         return {
-            "orders": orders, "pieces": r["pieces"], "awaiting": r["awaiting"] or 0,
+            "orders": orders, "pieces": total_pieces, "awaiting": r["awaiting"] or 0,
             "sales": r["sales"], "cost": r["cost"], "profit": r["profit"],
             "outstanding": r["outstanding"],
             "in_transit": sc.get("In Transit", 0), "in_warehouse": sc.get("In Warehouse", 0),
@@ -463,8 +464,9 @@ class Database:
     # ---------- لوحة معلومات أمريكا ----------
     def usa_dashboard(self):
         orders = self._exec("SELECT COUNT(*) c FROM usa_orders", fetch="one")["c"]
+        total_pieces = self._exec("SELECT COUNT(*) c FROM usa_items", fetch="one")["c"]
         r = self._exec("""
-            SELECT COUNT(*) pieces,
+            SELECT
                 COALESCE(SUM(selling_price_egp),0) sales,
                 COALESCE(SUM(cost_egp),0) cost,
                 COALESCE(SUM(profit_egp),0) profit,
@@ -472,7 +474,7 @@ class Database:
             FROM usa_items WHERE status <> 'Ready For Sale'
         """, fetch="one")
         return {
-            "orders": orders, "pieces": r["pieces"], "sales": r["sales"],
+            "orders": orders, "pieces": total_pieces, "sales": r["sales"],
             "cost": r["cost"], "profit": r["profit"], "outstanding": r["outstanding"],
         }
 
