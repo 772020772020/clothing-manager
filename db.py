@@ -266,7 +266,7 @@ class Database:
             ),0) expected
             FROM items i JOIN orders o ON o.id=i.order_id
             WHERE i.weight_grams<=0
-              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
+              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Order Registered')
         """, fetch="one")
         sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
         sc = {row["status"]: row["c"] for row in sc_rows}
