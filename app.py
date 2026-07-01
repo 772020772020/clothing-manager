@@ -365,6 +365,7 @@ def _render_customer_search(key_prefix):
             "سعر البيع": egp(it["selling_price_egp"]),
             "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
             "الوزن (جم)": f'{it["weight_grams"]:g}',
+            "التكلفة (ج.م)": egp(it["total_cost_egp"]),
             "العربون": egp(it["deposit_paid"]),
             "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
             "الحالة": STATUS_AR.get(it["status"], it["status"]),
@@ -507,6 +508,7 @@ def view_dashboard():
                 "المنتج": it["product_name"],
                 "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
                 "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "التكلفة (ج.م)": egp(it["total_cost_egp"]),
                 "سعر البيع": egp(it["selling_price_egp"]),
                 "الربح": profit,
             })
