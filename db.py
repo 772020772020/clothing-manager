@@ -252,7 +252,7 @@ class Database:
                 COALESCE(SUM(selling_price_egp),0) sales,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
                 COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit,
-                COALESCE(SUM(CASE WHEN status <> 'Delivered'
+                COALESCE(SUM(CASE WHEN status NOT IN ('Delivered','Order Registered')
                     THEN selling_price_egp-deposit_paid ELSE 0 END),0) outstanding
             FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
         """, fetch="one")
