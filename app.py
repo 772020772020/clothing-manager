@@ -491,7 +491,7 @@ def view_dashboard():
     c9.metric("تم التسليم", s["delivered"])
     c10.metric("أرصدة مستحقة", egp(s["outstanding"]))
 
-    st.info(f"🔮 الربح المتوقع للقطع التي لم تصل بعد (بتقدير وزن 500ج لكل قطعة): **{egp(s.get('expected_profit', 0))}** — تقدير فقط ولا يؤثر على أي حساب.")
+    st.info(f"🔮 الربح المتوقع للقطع التي لم تصل بعد (بتقدير وزن 500ج لكل قطعة): **{egp(s.get('expected_profit', 0))}** — محسوب على **{s.get('expected_count', 0)} قطعة** لها سعر بيع وسعر شراء باليوان. تقدير فقط ولا يؤثر على أي حساب.")
 
     _render_net_after_expenses()
 
