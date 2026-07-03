@@ -258,15 +258,20 @@ class Database:
             FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale')
         """, fetch="one")
         # الربح المتوقع للقطع التي لم يصلها وزن بعد (تقدير وزن 500 جرام)
+        # نحسب فقط القطع الجاهزة للتقدير: لها سعر بيع وسعر شراء باليوان
         ep = self._exec("""
-            SELECT COALESCE(SUM(
-                i.selling_price_egp - (
-                    i.purchase_price_yuan * o.purchase_yuan_rate
-                    + 0.5 * o.shipping_price_per_kg_yuan * o.shipping_yuan_rate
-                )
-            ),0) expected
+            SELECT
+                COALESCE(SUM(
+                    i.selling_price_egp - (
+                        i.purchase_price_yuan * o.purchase_yuan_rate
+                        + 0.5 * o.shipping_price_per_kg_yuan * o.shipping_yuan_rate
+                    )
+                ),0) expected,
+                COUNT(*) cnt
             FROM items i JOIN orders o ON o.id=i.order_id
             WHERE i.weight_grams<=0
+              AND i.selling_price_egp > 0
+              AND i.purchase_price_yuan > 0
               AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Order Registered')
         """, fetch="one")
         sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
@@ -275,6 +280,7 @@ class Database:
             "orders": orders, "pieces": total_pieces, "awaiting": r["awaiting"] or 0,
             "sales": r["sales"], "cost": r["cost"], "profit": r["profit"],
             "outstanding": r["outstanding"], "expected_profit": ep["expected"],
+            "expected_count": ep["cnt"],
             "in_transit": sc.get("In Transit", 0), "in_warehouse": sc.get("In Warehouse", 0),
             "delivered": sc.get("Delivered", 0),
         }
