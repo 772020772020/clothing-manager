@@ -160,6 +160,17 @@ def rerun():
     st.rerun()
 
 
+def _flash(msg):
+    """يحفظ رسالة نجاح تظهر بعد إعادة التحميل (rerun)."""
+    st.session_state["_flash_msg"] = msg
+
+
+def _show_flash():
+    m = st.session_state.pop("_flash_msg", None)
+    if m:
+        st.success(m)
+
+
 # ============================================================
 #  صف الإجمالي تحت كل جدول
 # ============================================================
@@ -743,6 +754,18 @@ def _item_form(oid, item, form_key):
     status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
     status_en = ITEM_STATUSES[status_ar_list.index(status_ar)]
 
+    # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
+    new_order_id = None
+    if is_edit:
+        all_ords = db.all_orders()
+        ord_ids = [o["id"] for o in all_ords]
+        ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
+        cur_oid = item["order_id"]
+        cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
+        picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
+                                    index=cur_idx, key=f"{k}_ord")
+        new_order_id = ord_ids[ord_labels.index(picked_label)]
+
     # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
     weight_date = None
     if weight > 0:
@@ -769,12 +792,13 @@ def _item_form(oid, item, form_key):
         else:
             if is_edit:
                 db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
-                               weight, deposit, status_en, weight_date)
-                st.success("تم تعديل القطعة.")
+                               weight, deposit, status_en, weight_date, new_order_id=new_order_id)
+                moved = new_order_id is not None and new_order_id != item["order_id"]
+                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
             else:
                 db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date)
-                st.success("تمت إضافة القطعة.")
+                _flash("تم إضافة القطعة.")
             rerun()
 
 
@@ -997,6 +1021,18 @@ def _usa_item_form(oid, item, form_key):
     status = st.selectbox("الحالة", USA_STATUSES,
                           index=USA_STATUSES.index(cur_status) if cur_status in USA_STATUSES else 0,
                           format_func=lambda s: USA_STATUS_AR.get(s, s), key=f"{k}_status")
+
+    # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
+    new_order_id = None
+    if is_edit:
+        all_ords = db.usa_all_orders()
+        ord_ids = [o["id"] for o in all_ords]
+        ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
+        cur_oid = item["order_id"]
+        cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
+        picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
+                                    index=cur_idx, key=f"{k}_ord")
+        new_order_id = ord_ids[ord_labels.index(picked_label)]
     # معاينة الربح
     profit = (sell or 0) - (cost or 0)
     if status == "Ready For Sale":
@@ -1009,11 +1045,13 @@ def _usa_item_form(oid, item, form_key):
             st.error("اكتب اسم العميل أو المنتج على الأقل.")
         else:
             if is_edit:
-                db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status)
-                st.success("تم تعديل القطعة.")
+                db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status,
+                                   new_order_id=new_order_id)
+                moved = new_order_id is not None and new_order_id != item["order_id"]
+                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
             else:
                 db.usa_add_item(oid, customer, product, cost, sell, deposit, status)
-                st.success("تم إضافة القطعة.")
+                _flash("تم إضافة القطعة.")
             rerun()
 
 
@@ -1302,6 +1340,7 @@ def view_usa_reports():
 #  التوجيه
 # ============================================================
 view = st.session_state.view
+_show_flash()
 if view == "dashboard":
     view_dashboard()
 elif view == "orders":
