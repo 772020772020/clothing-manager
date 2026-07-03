@@ -162,15 +162,16 @@ class Database:
             fetch="id")
 
     def update_item(self, iid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
-                    status="Order Registered", weight_date=None):
+                    status="Order Registered", weight_date=None, new_order_id=None):
         it = self.get_item(iid)
-        c = self._compute(it["order_id"], buy_yuan, weight_g, sell)
+        target_oid = new_order_id if new_order_id is not None else it["order_id"]
+        c = self._compute(target_oid, buy_yuan, weight_g, sell)
         self._exec(
-            """UPDATE items SET customer_name=%s, product_name=%s, selling_price_egp=%s,
+            """UPDATE items SET order_id=%s, customer_name=%s, product_name=%s, selling_price_egp=%s,
                purchase_price_yuan=%s, weight_grams=%s, deposit_paid=%s, status=%s,
                purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s, weight_date=%s
                WHERE id=%s""",
-            (customer, product, sell, buy_yuan, weight_g, deposit, status,
+            (target_oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date, iid))
 
     def update_item_status(self, iid, status):
@@ -436,12 +437,18 @@ class Database:
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (order_id, customer, product, cost, sell, deposit, profit, status), fetch="id")
 
-    def usa_update_item(self, item_id, customer, product, cost, sell, deposit, status):
+    def usa_update_item(self, item_id, customer, product, cost, sell, deposit, status, new_order_id=None):
         profit = (sell or 0) - (cost or 0)
-        self._exec(
-            """UPDATE usa_items SET customer_name=%s, product_name=%s, cost_egp=%s,
-               selling_price_egp=%s, deposit_paid=%s, profit_egp=%s, status=%s WHERE id=%s""",
-            (customer, product, cost, sell, deposit, profit, status, item_id))
+        if new_order_id is not None:
+            self._exec(
+                """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, cost_egp=%s,
+                   selling_price_egp=%s, deposit_paid=%s, profit_egp=%s, status=%s WHERE id=%s""",
+                (new_order_id, customer, product, cost, sell, deposit, profit, status, item_id))
+        else:
+            self._exec(
+                """UPDATE usa_items SET customer_name=%s, product_name=%s, cost_egp=%s,
+                   selling_price_egp=%s, deposit_paid=%s, profit_egp=%s, status=%s WHERE id=%s""",
+                (customer, product, cost, sell, deposit, profit, status, item_id))
 
     def usa_delete_item(self, item_id):
         self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
