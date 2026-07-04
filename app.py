@@ -18,7 +18,11 @@ import storage
 #  إعداد الصفحة + RTL
 # ============================================================
 import os as _os_icon
-_page_icon = "favicon.png" if _os_icon.exists("favicon.png") else "🧵"
+_page_icon = "🧵"
+for _ic in ("favicon.png", "Favicon.png", "logo.png"):
+    if _os_icon.path.exists(_ic):
+        _page_icon = _ic
+        break
 st.set_page_config(page_title="Infinity Boutique Management", page_icon=_page_icon,
                    layout="wide", initial_sidebar_state="collapsed")
 
