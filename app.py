@@ -177,14 +177,22 @@ def rerun():
     st.rerun()
 
 
-def _flash(msg):
-    """يحفظ رسالة نجاح تظهر بعد إعادة التحميل (rerun)."""
-    st.session_state["_flash_msg"] = msg
+def _flash(msg, form_key=None):
+    """يحفظ رسالة نجاح تظهر بعد rerun. مع form_key تظهر تحت زر الحفظ داخل الفورم."""
+    st.session_state["_flash_msg"] = (msg, form_key) if form_key else msg
+
+
+def _show_flash_here(form_key):
+    """يعرض رسالة النجاح تحت زر الحفظ داخل نفس الفورم."""
+    data = st.session_state.get("_flash_msg")
+    if data and isinstance(data, tuple) and data[1] == form_key:
+        st.success(data[0])
+        st.session_state.pop("_flash_msg", None)
 
 
 def _show_flash():
     m = st.session_state.pop("_flash_msg", None)
-    if m:
+    if m and not isinstance(m, tuple):
         st.success(m)
 
 
@@ -811,12 +819,13 @@ def _item_form(oid, item, form_key):
                 db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date, new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
-                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
+                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.", form_key=k)
             else:
                 db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date)
-                _flash("تم إضافة القطعة.")
+                _flash("تم إضافة القطعة.", form_key=k)
             rerun()
+    _show_flash_here(k)
 
 
 
@@ -1065,11 +1074,12 @@ def _usa_item_form(oid, item, form_key):
                 db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status,
                                    new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
-                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
+                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.", form_key=k)
             else:
                 db.usa_add_item(oid, customer, product, cost, sell, deposit, status)
-                _flash("تم إضافة القطعة.")
+                _flash("تم إضافة القطعة.", form_key=k)
             rerun()
+    _show_flash_here(k)
 
 
 def view_usa_dashboard():
