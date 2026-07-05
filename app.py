@@ -26,24 +26,16 @@ for _ic in ("favicon.png", "Favicon.png", "logo.png"):
 st.set_page_config(page_title="Infinity Boutique Management", page_icon=_page_icon,
                    layout="wide", initial_sidebar_state="collapsed")
 
-# أيقونة الآيفون على الشاشة الرئيسية (apple-touch-icon) من اللوجو
-import base64 as _b64
-def _inject_apple_icon():
-    for _p in ("Favicon.png", "favicon.png", "logo.png"):
-        if _os_icon.path.exists(_p):
-            try:
-                with open(_p, "rb") as _f:
-                    _data = _b64.b64encode(_f.read()).decode()
-                _uri = f"data:image/png;base64,{_data}"
-                st.markdown(
-                    f'<link rel="apple-touch-icon" href="{_uri}">'
-                    f'<link rel="apple-touch-icon" sizes="180x180" href="{_uri}">'
-                    f'<link rel="icon" type="image/png" href="{_uri}">',
-                    unsafe_allow_html=True)
-            except Exception:
-                pass
-            break
-_inject_apple_icon()
+# أيقونة الآيفون على الشاشة الرئيسية (apple-touch-icon)
+# نستخدم رابط مباشر من GitHub (أكثر توافقاً مع iOS من data-uri)
+_ICON_URL = "https://raw.githubusercontent.com/772020772020/clothing-manager/main/logo.png"
+st.markdown(
+    f'<link rel="apple-touch-icon" href="{_ICON_URL}">'
+    f'<link rel="apple-touch-icon" sizes="180x180" href="{_ICON_URL}">'
+    f'<link rel="apple-touch-icon" sizes="152x152" href="{_ICON_URL}">'
+    f'<link rel="apple-touch-icon" sizes="120x120" href="{_ICON_URL}">'
+    f'<link rel="icon" type="image/png" href="{_ICON_URL}">',
+    unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -411,7 +403,7 @@ def _render_customer_search(key_prefix):
 
     # تعديل قطعة كاملة مباشرة من هنا
     st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
-    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({STATUS_AR.get(it["status"], it["status"])})': it["id"]
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({STATUS_AR.get(it["status"], it["status"])}) #{it["id"]}': it["id"]
             for it in citems}
     if opts:
         pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
@@ -1194,7 +1186,7 @@ def _render_usa_customer_search(key_prefix):
 
     # تعديل قطعة كاملة مباشرة من هنا
     st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
-    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({USA_STATUS_AR.get(it["status"], it["status"])})': it
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({USA_STATUS_AR.get(it["status"], it["status"])}) #{it["id"]}': it
             for it in citems}
     if opts:
         pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
