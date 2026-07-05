@@ -26,6 +26,25 @@ for _ic in ("favicon.png", "Favicon.png", "logo.png"):
 st.set_page_config(page_title="Infinity Boutique Management", page_icon=_page_icon,
                    layout="wide", initial_sidebar_state="collapsed")
 
+# أيقونة الآيفون على الشاشة الرئيسية (apple-touch-icon) من اللوجو
+import base64 as _b64
+def _inject_apple_icon():
+    for _p in ("Favicon.png", "favicon.png", "logo.png"):
+        if _os_icon.path.exists(_p):
+            try:
+                with open(_p, "rb") as _f:
+                    _data = _b64.b64encode(_f.read()).decode()
+                _uri = f"data:image/png;base64,{_data}"
+                st.markdown(
+                    f'<link rel="apple-touch-icon" href="{_uri}">'
+                    f'<link rel="apple-touch-icon" sizes="180x180" href="{_uri}">'
+                    f'<link rel="icon" type="image/png" href="{_uri}">',
+                    unsafe_allow_html=True)
+            except Exception:
+                pass
+            break
+_inject_apple_icon()
+
 st.markdown("""
 <style>
     .stApp { direction: rtl; }
