@@ -261,10 +261,19 @@ def show_df(df, style=False):
         st.dataframe(df2, use_container_width=True, hide_index=True)
 
 
-def _receipts_box(folder, title="📎 صور التحويلات", key=None):
-    """صندوق رفع وعرض صور (إيصالات/تحويلات) مرتبط بمجلد معيّن."""
+def _receipts_box(folder, title="📎 صور التحويلات", key=None, collapsible=False):
+    """صندوق رفع وعرض صور. collapsible=True يضعه داخل قسم قابل للطي."""
     k = key or folder
-    st.markdown(f"##### {title}")
+    if collapsible:
+        n = len(storage.list_images(folder)) if storage.is_enabled() else 0
+        with st.expander(f"{title} ({n})", expanded=False):
+            _receipts_box_body(folder, k)
+    else:
+        st.markdown(f"##### {title}")
+        _receipts_box_body(folder, k)
+
+
+def _receipts_box_body(folder, k):
     if not storage.is_enabled():
         st.info("خدمة تخزين الصور غير مفعّلة بعد. (تحتاج إضافة supabase_url و supabase_key في الإعدادات.)")
         return
@@ -683,7 +692,7 @@ def view_order_details():
 
     # صور تحويلات فلوس العملاء لهذا الأوردر
     with st.container(border=True):
-        _receipts_box(f"order_{oid}", title="📎 صور تحويلات العملاء", key=f"cn_rcpt_{oid}")
+        _receipts_box(f"order_{oid}", title="📎 مرفقات الأوردر", key=f"cn_rcpt_{oid}", collapsible=True)
 
     # إضافة قطعة
     with st.expander("➕ إضافة قطعة جديدة", expanded=False):
@@ -907,8 +916,8 @@ def view_reports():
         # صور تحويلات الشحن لهذا اليوم (الميزان + الحساب + التحويل)
         st.divider()
         _receipts_box(f"shipping_{day_str}",
-                      title="🚚 صور الشحن لهذا اليوم (الميزان / الحساب / التحويل)",
-                      key=f"ship_{day_str}")
+                      title="🚚 مرفقات الشحن (الميزان / الحساب / التحويل)",
+                      key=f"ship_{day_str}", collapsible=True)
 
     with tab4:
         rows = db.report_monthly()
@@ -1268,7 +1277,7 @@ def view_usa_order_details():
 
     # صور تحويلات فلوس العملاء لهذا الأوردر
     with st.container(border=True):
-        _receipts_box(f"usa_order_{oid}", title="📎 صور تحويلات العملاء", key=f"usa_rcpt_{oid}")
+        _receipts_box(f"usa_order_{oid}", title="📎 مرفقات الأوردر", key=f"usa_rcpt_{oid}", collapsible=True)
 
     with st.expander("➕ إضافة قطعة جديدة", expanded=False):
         _usa_item_form(oid, item=None, form_key="usa_add_item")
