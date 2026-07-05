@@ -819,13 +819,12 @@ def _item_form(oid, item, form_key):
                 db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date, new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
-                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.", form_key=k)
+                st.success("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
             else:
                 db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date)
-                _flash("تم إضافة القطعة.", form_key=k)
-            rerun()
-    _show_flash_here(k)
+                st.success("تم إضافة القطعة.")
+            st.cache_data.clear()
 
 
 
@@ -1074,12 +1073,11 @@ def _usa_item_form(oid, item, form_key):
                 db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status,
                                    new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
-                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.", form_key=k)
+                st.success("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
             else:
                 db.usa_add_item(oid, customer, product, cost, sell, deposit, status)
-                _flash("تم إضافة القطعة.", form_key=k)
-            rerun()
-    _show_flash_here(k)
+                st.success("تم إضافة القطعة.")
+            st.cache_data.clear()
 
 
 def view_usa_dashboard():
