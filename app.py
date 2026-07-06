@@ -338,19 +338,26 @@ _show_logo(140)
 st.markdown("#### 🧵 Infinity Boutique Management")
 
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
-in_usa = st.session_state.get("view", "dashboard") in USA_VIEWS
+_cur_view = st.session_state.get("view", "dashboard")
+in_usa = _cur_view in USA_VIEWS
+in_ledger = _cur_view == "ledger"
 
-# ===== التبويبتان الكبيرتان: الصين / أمريكا =====
-big1, big2 = st.columns(2)
+# ===== التبويبات الكبيرة: الصين / أمريكا / حسابات شخصية =====
+big1, big2, big3 = st.columns(3)
 if big1.button("🇨🇳 الصين", use_container_width=True,
-               type=("primary" if not in_usa else "secondary")):
+               type=("primary" if (not in_usa and not in_ledger) else "secondary")):
     go("dashboard"); rerun()
 if big2.button("🇺🇸 أمريكا", use_container_width=True,
                type=("primary" if in_usa else "secondary")):
     go("usa_dashboard"); rerun()
+if big3.button("💰 حسابات شخصية", use_container_width=True,
+               type=("primary" if in_ledger else "secondary")):
+    go("ledger"); rerun()
 
 # ===== أقسام النظام المختار =====
-if in_usa:
+if in_ledger:
+    pass  # صفحة مستقلة بلا أقسام
+elif in_usa:
     n1, n2, n3, n4 = st.columns(4)
     if n1.button("📊 لوحة المعلومات", use_container_width=True, key="usa_nav_dash"):
         go("usa_dashboard"); rerun()
@@ -1371,6 +1378,89 @@ def view_usa_reports():
 
 
 # ============================================================
+#  حسابات شخصية (بند مستقل - شبه شيت إكسل)
+# ============================================================
+def view_ledger():
+    st.header("💰 حسابات شخصية")
+    st.caption("بند مستقل لتسجيل فلوس تدفعها لأشخاص وتستردها — مثل شيت إكسل.")
+
+    persons = db.ledger_persons()
+    # اختيار شخص موجود أو إضافة جديد
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        chosen = st.selectbox("اختر شخص", ["— اختر —"] + persons, key="ledger_person_pick")
+    with c2:
+        new_person = st.text_input("أو أضف شخص جديد", key="ledger_new_person")
+
+    person = None
+    if new_person.strip():
+        person = new_person.strip()
+    elif chosen != "— اختر —":
+        person = chosen
+
+    if not person:
+        st.info("اختر شخصاً موجوداً أو اكتب اسم شخص جديد للبدء.")
+        return
+
+    st.subheader(f"حساب: {person}")
+
+    # إضافة حركة جديدة
+    with st.expander("➕ إضافة حركة", expanded=True):
+        d1, d2 = st.columns(2)
+        e_date = d1.date_input("التاريخ", value=date.today(), key="ledger_date")
+        e_desc = d2.text_input("البيان", key="ledger_desc", placeholder="سبب الدفع/الاسترداد")
+        d3, d4 = st.columns(2)
+        with d3:
+            a_out = _num("فلوس دفعتها له (طالعة)", 0, key="ledger_out")
+        with d4:
+            a_in = _num("فلوس استرددتها منه (راجعة)", 0, key="ledger_in")
+        if st.button("💾 حفظ الحركة", type="primary", key="ledger_save"):
+            if (a_out or 0) <= 0 and (a_in or 0) <= 0:
+                st.error("اكتب مبلغ في خانة الطالعة أو الراجعة.")
+            else:
+                db.ledger_add(person, e_date.isoformat(), e_desc.strip(), a_out, a_in)
+                st.success("تم حفظ الحركة.")
+                st.cache_data.clear()
+                rerun()
+
+    # جدول الحركات
+    entries = db.ledger_entries(person)
+    if entries:
+        rows = []
+        running = 0.0
+        for e in entries:
+            running += (e["amount_out"] or 0) - (e["amount_in"] or 0)
+            rows.append({
+                "التاريخ": e["entry_date"],
+                "البيان": e["description"] or "",
+                "طالعة (دفعت)": egp(e["amount_out"]) if e["amount_out"] else "",
+                "راجعة (استرد)": egp(e["amount_in"]) if e["amount_in"] else "",
+                "الرصيد الجاري": egp(running),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        s = db.ledger_summary(person)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("إجمالي المدفوع (طالعة)", egp(s["total_out"]))
+        m2.metric("إجمالي المسترد (راجعة)", egp(s["total_in"]))
+        m3.metric("الباقي له عندك", egp(s["balance"]))
+
+        # حذف حركة
+        st.markdown("##### 🗑️ حذف حركة")
+        opts = {f'{e["entry_date"]} — {e["description"] or "بدون بيان"} '
+                f'(طالعة {e["amount_out"]:g} / راجعة {e["amount_in"]:g}) #{e["id"]}': e["id"]
+                for e in entries}
+        pick = st.selectbox("اختر الحركة للحذف", list(opts.keys()), key="ledger_delpick")
+        if st.button("حذف الحركة المختارة", key="ledger_del"):
+            db.ledger_delete(opts[pick])
+            st.success("تم الحذف.")
+            st.cache_data.clear()
+            rerun()
+    else:
+        st.info("لا توجد حركات بعد لهذا الشخص. أضف حركة من الأعلى.")
+
+
+# ============================================================
 #  التوجيه
 # ============================================================
 view = st.session_state.view
@@ -1391,3 +1481,5 @@ elif view == "usa_order_details":
     view_usa_order_details()
 elif view == "usa_reports":
     view_usa_reports()
+elif view == "ledger":
+    view_ledger()
