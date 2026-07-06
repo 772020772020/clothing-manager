@@ -369,6 +369,41 @@ class Database:
             amount DOUBLE PRECISION DEFAULT 0,
             notes TEXT DEFAULT ''
         )""")
+        # جدول الحسابات الشخصية (دفعات لأشخاص + استرداد)
+        self._exec("""CREATE TABLE IF NOT EXISTS ledger (
+            id SERIAL PRIMARY KEY,
+            person TEXT NOT NULL,
+            entry_date TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            amount_out DOUBLE PRECISION DEFAULT 0,
+            amount_in DOUBLE PRECISION DEFAULT 0
+        )""")
+
+    # ---------- الحسابات الشخصية ----------
+    def ledger_persons(self):
+        rows = self._exec("SELECT DISTINCT person FROM ledger WHERE person<>'' ORDER BY person", fetch="all")
+        return [r["person"] for r in rows]
+
+    def ledger_add(self, person, entry_date, description, amount_out=0, amount_in=0):
+        return self._exec(
+            """INSERT INTO ledger (person, entry_date, description, amount_out, amount_in)
+               VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+            (person, entry_date, description, amount_out, amount_in), fetch="id")
+
+    def ledger_delete(self, eid):
+        self._exec("DELETE FROM ledger WHERE id=%s", (eid,))
+
+    def ledger_entries(self, person):
+        return self._exec("""SELECT * FROM ledger WHERE person=%s
+            ORDER BY entry_date::date ASC, id ASC""", (person,), fetch="all")
+
+    def ledger_summary(self, person):
+        r = self._exec("""SELECT
+            COALESCE(SUM(amount_out),0) total_out,
+            COALESCE(SUM(amount_in),0) total_in
+            FROM ledger WHERE person=%s""", (person,), fetch="one")
+        return {"total_out": r["total_out"], "total_in": r["total_in"],
+                "balance": r["total_out"] - r["total_in"]}
 
     # ---------- المصاريف العامة ----------
     def add_expense(self, exp_date, name, amount, notes=""):
