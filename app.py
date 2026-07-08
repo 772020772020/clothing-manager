@@ -134,18 +134,22 @@ def egp(v):
 
 
 def _china_profit_disp(it):
-    """نص عمود الربح لقطعة صيني (يراعي الفوري وانتظار الوزن)."""
+    """نص عمود الربح لقطعة صيني (يراعي الفوري والقياس وانتظار الوزن)."""
     if it["status"] == "Ready For Sale":
         return "فوري (لسه)"
+    if it["status"] == "Out For Fitting":
+        return "خرج للقياس"
     if it["weight_grams"] <= 0:
         return "انتظار الوزن"
     return egp(it["profit_egp"])
 
 
 def _usa_profit_disp(it):
-    """نص عمود الربح لقطعة أمريكا (يراعي الفوري)."""
+    """نص عمود الربح لقطعة أمريكا (يراعي الفوري والقياس)."""
     if it["status"] == "Ready For Sale":
         return "فوري (لسه)"
+    if it["status"] == "Out For Fitting":
+        return "خرج للقياس"
     return egp(it["profit_egp"])
 
 
@@ -394,7 +398,7 @@ def _render_customer_search(key_prefix):
         return
     citems = db.items_of_customer(chosen_cust)
     # نستبعد القطع المرتجعة والفوري (غير المباعة) من كل الحسابات
-    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale")]
+    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")]
     tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
     tot_dep = sum(it["deposit_paid"] or 0 for it in active)
     tot_bal = tot_sales - tot_dep
@@ -1182,7 +1186,7 @@ def _render_usa_customer_search(key_prefix):
     if not chosen:
         return
     citems = db.usa_items_of_customer(chosen)
-    active = [it for it in citems if it["status"] != "Ready For Sale"]
+    active = [it for it in citems if it["status"] not in ("Ready For Sale", "Out For Fitting")]
     tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
     tot_cost = sum(it["cost_egp"] or 0 for it in active)
     tot_dep = sum(it["deposit_paid"] or 0 for it in active)
