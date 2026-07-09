@@ -1032,6 +1032,17 @@ def _build_backup():
         "التاريخ": e["exp_date"], "المصروف": e["name"], "المبلغ": e["amount"], "ملاحظة": e["notes"],
     } for e in db.all_expenses()])
 
+    # الحسابات الشخصية
+    try:
+        led_rows = db.ledger_all()
+    except Exception:
+        led_rows = []
+    ledger_df = pd.DataFrame([{
+        "الشخص": r["person"], "التاريخ": r["entry_date"], "البيان": r["description"] or "",
+        "طالعة (دفعت)": r["amount_out"], "راجعة (استرد)": r["amount_in"],
+        "الصافي": (r["amount_out"] or 0) - (r["amount_in"] or 0),
+    } for r in led_rows])
+
     def safe(df):
         return df if not df.empty else pd.DataFrame({"لا توجد بيانات": []})
 
@@ -1041,6 +1052,7 @@ def _build_backup():
         safe(usa_orders).to_excel(w, sheet_name="أمريكا - الأوردرات", index=False)
         safe(usa_items).to_excel(w, sheet_name="أمريكا - القطع", index=False)
         safe(exps).to_excel(w, sheet_name="المصاريف", index=False)
+        safe(ledger_df).to_excel(w, sheet_name="حسابات شخصية", index=False)
     buf.seek(0)
     return buf
 
