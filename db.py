@@ -398,6 +398,11 @@ class Database:
         return self._exec("""SELECT * FROM ledger WHERE person=%s
             ORDER BY entry_date::date ASC, id ASC""", (person,), fetch="all")
 
+    def ledger_all(self):
+        """كل حركات كل الأشخاص (للنسخة الاحتياطية)."""
+        return self._exec("""SELECT * FROM ledger
+            ORDER BY person ASC, entry_date::date ASC, id ASC""", fetch="all")
+
     def ledger_summary(self, person):
         r = self._exec("""SELECT
             COALESCE(SUM(amount_out),0) total_out,
