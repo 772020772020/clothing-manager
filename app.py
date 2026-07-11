@@ -438,7 +438,7 @@ def _render_customer_search(key_prefix):
         chosen_id = opts[pick]
         chosen_item = db.get_item(chosen_id)
         with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
-            _item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_edit_{chosen_id}")
+            _item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_custedit_{chosen_id}")
 
 
 # ============================================================
@@ -1232,7 +1232,7 @@ def _render_usa_customer_search(key_prefix):
         pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
         chosen_item = opts[pick]
         with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
-            _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_edit_{chosen_item['id']}")
+            _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_custedit_{chosen_item['id']}")
 
 
 def view_usa_orders():
@@ -1435,9 +1435,8 @@ def view_ledger():
                 st.error("اكتب مبلغ في خانة الطالعة أو الراجعة.")
             else:
                 db.ledger_add(person, e_date.isoformat(), e_desc.strip(), a_out, a_in)
-                st.success("تم حفظ الحركة.")
                 st.cache_data.clear()
-                rerun()
+                st.success("✅ تم حفظ الحركة.")
 
     # جدول الحركات
     entries = db.ledger_entries(person)
