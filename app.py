@@ -299,10 +299,21 @@ def _receipts_box_body(folder, k):
     imgs = storage.list_images(folder)
     if imgs:
         st.caption(f"الصور المحفوظة ({len(imgs)}):")
+        zoom_key = f"{k}_zoom"
+        # عرض الصورة المكبّرة (لو مختارة)
+        if st.session_state.get(zoom_key):
+            st.image(st.session_state[zoom_key], use_container_width=True)
+            if st.button("✖️ إغلاق العرض", key=f"{k}_zoomclose"):
+                st.session_state[zoom_key] = None
+                rerun()
+            st.divider()
         cols = st.columns(3)
         for i, (name, link) in enumerate(imgs):
             with cols[i % 3]:
                 st.image(link, use_container_width=True)
+                if st.button("🔍 عرض", key=f"{k}_view_{name}"):
+                    st.session_state[zoom_key] = link
+                    rerun()
                 if st.button("🗑️ حذف", key=f"{k}_del_{name}"):
                     if storage.delete_image(folder, name):
                         st.success("تم الحذف.")
