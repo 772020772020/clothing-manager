@@ -379,6 +379,65 @@ class Database:
             amount_out DOUBLE PRECISION DEFAULT 0,
             amount_in DOUBLE PRECISION DEFAULT 0
         )""")
+        # كروت الائتمان
+        self._exec("""CREATE TABLE IF NOT EXISTS cards (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            due_day INTEGER DEFAULT 1,
+            month_debt DOUBLE PRECISION DEFAULT 0,
+            debt_month TEXT DEFAULT ''
+        )""")
+        # سدادات الكروت
+        self._exec("""CREATE TABLE IF NOT EXISTS card_payments (
+            id SERIAL PRIMARY KEY,
+            card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            pay_date TEXT NOT NULL,
+            amount DOUBLE PRECISION DEFAULT 0,
+            notes TEXT DEFAULT ''
+        )""")
+
+    # ---------- كروت الائتمان ----------
+    def cards_all(self):
+        return self._exec("SELECT * FROM cards ORDER BY name", fetch="all")
+
+    def card_add(self, name, due_day=1):
+        return self._exec("INSERT INTO cards (name, due_day) VALUES (%s,%s) RETURNING id",
+                          (name, due_day), fetch="id")
+
+    def card_update(self, cid, name, due_day, month_debt, debt_month):
+        self._exec("""UPDATE cards SET name=%s, due_day=%s, month_debt=%s, debt_month=%s
+            WHERE id=%s""", (name, due_day, month_debt, debt_month, cid))
+
+    def card_set_debt(self, cid, month_debt, debt_month):
+        self._exec("UPDATE cards SET month_debt=%s, debt_month=%s WHERE id=%s",
+                   (month_debt, debt_month, cid))
+
+    def card_delete(self, cid):
+        self._exec("DELETE FROM cards WHERE id=%s", (cid,))
+
+    def card_get(self, cid):
+        return self._exec("SELECT * FROM cards WHERE id=%s", (cid,), fetch="one")
+
+    def card_payments(self, cid):
+        return self._exec("""SELECT * FROM card_payments WHERE card_id=%s
+            ORDER BY pay_date::date ASC, id ASC""", (cid,), fetch="all")
+
+    def card_payment_add(self, cid, pay_date, amount, notes=""):
+        return self._exec(
+            "INSERT INTO card_payments (card_id, pay_date, amount, notes) VALUES (%s,%s,%s,%s) RETURNING id",
+            (cid, pay_date, amount, notes), fetch="id")
+
+    def card_payment_update(self, pid, pay_date, amount, notes=""):
+        self._exec("UPDATE card_payments SET pay_date=%s, amount=%s, notes=%s WHERE id=%s",
+                   (pay_date, amount, notes, pid))
+
+    def card_payment_delete(self, pid):
+        self._exec("DELETE FROM card_payments WHERE id=%s", (pid,))
+
+    def card_paid_total(self, cid):
+        r = self._exec("SELECT COALESCE(SUM(amount),0) t FROM card_payments WHERE card_id=%s",
+                       (cid,), fetch="one")
+        return r["t"] if r else 0
 
     # ---------- الحسابات الشخصية ----------
     def ledger_persons(self):
