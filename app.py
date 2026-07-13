@@ -1407,9 +1407,138 @@ def view_usa_reports():
 # ============================================================
 #  حسابات شخصية (بند مستقل - شبه شيت إكسل)
 # ============================================================
+def _render_cards():
+    st.caption("سجّل كروت الائتمان، مديونية كل شهر، والسدادات — مع تنبيه قرب موعد الاستحقاق.")
+
+    # إضافة كارت جديد
+    with st.expander("➕ إضافة كارت جديد", expanded=False):
+        c1, c2 = st.columns([2, 1])
+        cname = c1.text_input("اسم الكارت", key="card_new_name", placeholder="مثال: CIB, بنك مصر...")
+        cday = c2.number_input("يوم الاستحقاق من كل شهر", min_value=1, max_value=31, value=1, key="card_new_day")
+        if st.button("💾 حفظ الكارت", type="primary", key="card_new_save"):
+            if not cname.strip():
+                st.error("اكتب اسم الكارت.")
+            else:
+                db.card_add(cname.strip(), int(cday))
+                st.cache_data.clear()
+                st.success("✅ تم إضافة الكارت.")
+
+    cards = db.cards_all()
+    if not cards:
+        st.info("لا توجد كروت بعد. أضف كارت من الأعلى.")
+        return
+
+    # تنبيهات الاستحقاق
+    today = date.today()
+    for c in cards:
+        paid = db.card_paid_total(c["id"])
+        remaining = (c["month_debt"] or 0) - paid
+        if remaining > 0:
+            due_day = c["due_day"] or 1
+            # حساب أيام متبقية على الاستحقاق هذا الشهر
+            try:
+                due_date = today.replace(day=min(due_day, 28))
+            except Exception:
+                due_date = today
+            if due_date < today:
+                # الاستحقاق فات هذا الشهر → الشهر الجاي
+                import calendar as _cal
+                m = today.month + 1
+                y = today.year + (1 if m > 12 else 0)
+                m = 1 if m > 12 else m
+                due_date = date(y, m, min(due_day, _cal.monthrange(y, m)[1]))
+            days_left = (due_date - today).days
+            if days_left <= 5:
+                st.warning(f"⏰ كارت **{c['name']}**: باقي {days_left} يوم على الاستحقاق ({due_date.isoformat()}) — متبقّي {egp(remaining)}")
+
+    st.divider()
+    # اختيار كارت للعرض/الإدارة
+    labels = [f'{c["name"]} (استحقاق يوم {c["due_day"]})' for c in cards]
+    idx = st.selectbox("اختر الكارت", range(len(cards)), format_func=lambda i: labels[i], key="card_pick")
+    card = cards[idx]
+    cid = card["id"]
+
+    paid = db.card_paid_total(cid)
+    remaining = (card["month_debt"] or 0) - paid
+    m1, m2, m3 = st.columns(3)
+    m1.metric("مديونية الشهر", egp(card["month_debt"]))
+    m2.metric("إجمالي المسدّد", egp(paid))
+    m3.metric("المتبقي", egp(remaining))
+    if card["debt_month"]:
+        st.caption(f"مديونية مسجّلة لشهر: {card['debt_month']}")
+
+    # تحديث مديونية الشهر
+    with st.expander("📝 إدخال / تحديث مديونية الشهر", expanded=False):
+        d1, d2 = st.columns(2)
+        new_debt = _num("مديونية هذا الشهر (ج.م)", card["month_debt"] or 0, key=f"card_debt_{cid}")
+        month_lbl = d2.text_input("الشهر", value=card["debt_month"] or today.strftime("%Y-%m"), key=f"card_month_{cid}")
+        if st.button("💾 حفظ المديونية", key=f"card_savedebt_{cid}"):
+            db.card_set_debt(cid, new_debt, month_lbl.strip())
+            st.cache_data.clear()
+            st.success("✅ تم تحديث المديونية.")
+
+    # إضافة سداد
+    with st.expander("➕ تسجيل سداد", expanded=True):
+        p1, p2 = st.columns(2)
+        pay_date = p1.date_input("تاريخ السداد", value=today, key=f"card_pdate_{cid}")
+        pay_amt = _num("المبلغ المسدّد (ج.م)", 0, key=f"card_pamt_{cid}")
+        pay_notes = p2.text_input("ملاحظة (اختياري)", key=f"card_pnotes_{cid}")
+        if st.button("💾 حفظ السداد", type="primary", key=f"card_psave_{cid}"):
+            if (pay_amt or 0) <= 0:
+                st.error("اكتب مبلغ صحيح.")
+            else:
+                db.card_payment_add(cid, pay_date.isoformat(), pay_amt, pay_notes.strip())
+                st.cache_data.clear()
+                st.success("✅ تم حفظ السداد.")
+
+    # جدول السدادات + تعديل/حذف
+    pays = db.card_payments(cid)
+    if pays:
+        st.markdown("##### سدادات هذا الكارت")
+        rows = [{"التاريخ": p["pay_date"], "المبلغ": egp(p["amount"]), "ملاحظة": p["notes"] or ""} for p in pays]
+        show_df(pd.DataFrame(rows))
+
+        st.markdown("##### ✏️ تعديل / حذف سداد")
+        opts = {f'{p["pay_date"]} — {egp(p["amount"])} #{p["id"]}': p for p in pays}
+        pick = st.selectbox("اختر السداد", list(opts.keys()), key=f"card_paypick_{cid}")
+        chosen_pay = opts[pick]
+        e1, e2 = st.columns(2)
+        ed_date = e1.date_input("التاريخ", value=date.fromisoformat(chosen_pay["pay_date"]), key=f"card_editdate_{cid}")
+        ed_amt = _num("المبلغ", chosen_pay["amount"], key=f"card_editamt_{cid}")
+        ed_notes = st.text_input("ملاحظة", value=chosen_pay["notes"] or "", key=f"card_editnotes_{cid}")
+        b1, b2 = st.columns(2)
+        if b1.button("💾 حفظ التعديل", key=f"card_editsave_{cid}"):
+            db.card_payment_update(chosen_pay["id"], ed_date.isoformat(), ed_amt, ed_notes.strip())
+            st.cache_data.clear()
+            st.success("✅ تم تعديل السداد.")
+        if b2.button("🗑️ حذف السداد", key=f"card_editdel_{cid}"):
+            db.card_payment_delete(chosen_pay["id"])
+            st.cache_data.clear()
+            rerun()
+    else:
+        st.info("لا توجد سدادات لهذا الكارت بعد.")
+
+    st.divider()
+    # حذف الكارت
+    with st.expander("🗑️ حذف هذا الكارت نهائياً"):
+        st.warning("سيتم حذف الكارت وكل سداداته.")
+        if st.button("تأكيد حذف الكارت", key=f"card_delete_{cid}"):
+            db.card_delete(cid)
+            st.cache_data.clear()
+            rerun()
+
+
 def view_ledger():
     st.header("💰 حسابات شخصية")
-    st.caption("بند مستقل لتسجيل فلوس تدفعها لأشخاص وتستردها — مثل شيت إكسل.")
+    tab_p, tab_c = st.tabs(["👤 حسابات الأشخاص", "💳 كروت الائتمان"])
+    with tab_p:
+        _render_persons_ledger()
+    with tab_c:
+        _render_cards()
+
+
+def _render_persons_ledger():
+    st.caption("بند لتسجيل فلوس تدفعها لأشخاص وتستردها — مثل شيت إكسل.")
 
     persons = db.ledger_persons()
     # اختيار شخص موجود أو إضافة جديد
