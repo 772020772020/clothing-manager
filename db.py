@@ -179,6 +179,38 @@ class Database:
         """تحديث حالة القطعة فقط (للوحة المعلومات)."""
         self._exec("UPDATE items SET status=%s WHERE id=%s", (status, iid))
 
+    def report_expected_vs_actual(self):
+        """مقارنة الربح المتوقع (تقدير 500ج) بالربح الحقيقي للقطع التي وصل وزنها."""
+        return self._exec("""
+            SELECT o.order_number, i.customer_name, i.product_name,
+                i.selling_price_egp, i.purchase_price_yuan, i.weight_grams, i.profit_egp AS actual,
+                (i.selling_price_egp - (
+                    i.purchase_price_yuan * o.purchase_yuan_rate
+                    + 0.5 * o.shipping_price_per_kg_yuan * o.shipping_yuan_rate
+                )) AS expected
+            FROM items i JOIN orders o ON o.id=i.order_id
+            WHERE i.weight_grams > 0
+              AND i.selling_price_egp > 0
+              AND i.purchase_price_yuan > 0
+              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC
+        """, fetch="all")
+
+    def report_outstanding_by_customer(self):
+        """العملاء الذين عليهم مبالغ مستحقة (تسليم آجل أو لم يُسلَّم بعد)، مرتّبين تنازلياً."""
+        return self._exec("""
+            SELECT customer_name,
+                COUNT(*) pieces,
+                COALESCE(SUM(selling_price_egp),0) sales,
+                COALESCE(SUM(deposit_paid),0) deposits,
+                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
+            FROM items
+            WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Delivered','Order Registered')
+            GROUP BY customer_name
+            HAVING COALESCE(SUM(selling_price_egp-deposit_paid),0) > 0
+            ORDER BY outstanding DESC
+        """, fetch="all")
+
     def items_by_status(self, status):
         """كل القطع في حالة معيّنة مع رقم الأوردر."""
         return self._exec("""SELECT i.*, o.order_number FROM items i
