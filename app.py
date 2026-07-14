@@ -865,8 +865,9 @@ def _item_form(oid, item, form_key):
 def view_reports():
     st.header("📈 التقارير")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية", "💸 المصاريف"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية",
+         "💸 المصاريف", "🔮 متوقع مقابل حقيقي", "💰 أرصدة مستحقة"])
 
     with tab1:
         rows = db.report_by_order()
@@ -960,6 +961,45 @@ def view_reports():
     with tab6:
         st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
         _render_expenses_manager("cn_exp")
+
+    with tab7:
+        st.markdown("##### 🔮 مقارنة الربح المتوقع بالحقيقي")
+        st.caption("للقطع التي كان لها ربح متوقع (تقدير 500ج) ثم وصل وزنها وعُرف ربحها الحقيقي.")
+        rows = db.report_expected_vs_actual()
+        if rows:
+            data = []
+            for r in rows:
+                exp = r["expected"] or 0
+                act = r["actual"] or 0
+                data.append({
+                    "الأوردر": r["order_number"],
+                    "العميل": r["customer_name"],
+                    "المنتج": r["product_name"],
+                    "الوزن (جم)": f'{r["weight_grams"]:g}',
+                    "الربح المتوقع": round(exp, 2),
+                    "الربح الحقيقي": round(act, 2),
+                    "الفرق": round(act - exp, 2),
+                })
+            show_df(pd.DataFrame(data))
+            st.caption("الفرق = الحقيقي − المتوقع. لو موجب يبقى القطعة طلعت أحسن من المتوقع، ولو سالب أقل.")
+        else:
+            st.info("لا توجد قطع مكتملة الوزن للمقارنة بعد.")
+
+    with tab8:
+        st.markdown("##### 💰 العملاء الذين عليهم مبالغ مستحقة")
+        st.caption("العملاء الذين استلموا أو في الطريق ولم يدفعوا كامل المبلغ (يشمل تسليم آجل).")
+        rows = db.report_outstanding_by_customer()
+        if rows:
+            data = [{
+                "اسم العميل": r["customer_name"],
+                "عدد القطع": r["pieces"],
+                "إجمالي البيع": round(r["sales"], 2),
+                "المدفوع (عربون)": round(r["deposits"], 2),
+                "المتبقي عليه": round(r["outstanding"], 2),
+            } for r in rows]
+            show_df(pd.DataFrame(data))
+        else:
+            st.info("لا توجد مبالغ مستحقة حالياً. 🎉")
 
     st.divider()
     st.download_button("📥 تصدير كل التقارير Excel", data=_build_excel(),
@@ -1497,6 +1537,8 @@ def _render_cards():
         st.markdown("##### سدادات هذا الكارت")
         rows = [{"التاريخ": p["pay_date"], "المبلغ": egp(p["amount"]), "ملاحظة": p["notes"] or ""} for p in pays]
         show_df(pd.DataFrame(rows))
+        st.success(f"💳 المديونية المتبقية بعد السداد: **{egp(remaining)}**  (المديونية {egp(card['month_debt'])} − المسدّد {egp(paid)})")
+        st.info(f"💳 مديونية الشهر: {egp(card['month_debt'])}  −  إجمالي المسدّد: {egp(paid)}  =  **المتبقي: {egp(remaining)}**")
 
         st.markdown("##### ✏️ تعديل / حذف سداد")
         opts = {f'{p["pay_date"]} — {egp(p["amount"])} #{p["id"]}': p for p in pays}
