@@ -266,23 +266,37 @@ def show_df(df, style=False):
 
 
 def _customer_name_input(label, current, names, key):
-    """خانة اسم العميل: تكتب فيها، وتحتها اقتراحات بالعملاء المسجلين المطابقين.
-    توحّد الكابيتال/سمول لمنع تكرار نفس العميل بهجاء مختلف."""
-    typed = st.text_input(label, value=current or "", key=f"{key}_cust_txt",
-                          placeholder="اكتب اسم العميل...")
-    t = (typed or "").strip()
-    if t:
-        matches = [n for n in names
-                   if t.lower() in n.strip().lower()
-                   and n.strip().lower() != t.lower()]
-        if matches:
-            st.caption("👇 عملاء مسجلون مشابهون — اضغط لاستخدام الاسم:")
-            # بدون أعمدة (لأن الخانة نفسها داخل عمود، و Streamlit يمنع تداخل الأعمدة)
+    """قائمة قابلة للبحث بأسماء العملاء (زي البحث في لوحة المعلومات)،
+    وتقبل كتابة اسم جديد غير مسجّل. توحّد الكابيتال/سمول."""
+    opts = list(names)
+    if current and not any(current.strip().lower() == n.strip().lower() for n in opts):
+        opts = [current] + opts
+
+    idx = None
+    if current:
+        for i, n in enumerate(opts):
+            if n.strip().lower() == current.strip().lower():
+                idx = i
+                break
+    try:
+        picked = st.selectbox(label, opts, index=idx,
+                              accept_new_options=True,
+                              placeholder="اكتب اسم العميل للبحث أو أضف جديد...",
+                              key=f"{key}_pick")
+        return (picked or "").strip()
+    except TypeError:
+        # إصدار Streamlit أقدم: خانة كتابة + اقتراحات
+        typed = st.text_input(label, value=current or "", key=f"{key}_cust_txt",
+                              placeholder="اكتب اسم العميل...")
+        t = (typed or "").strip()
+        if t:
+            matches = [n for n in names if t.lower() in n.strip().lower()
+                       and n.strip().lower() != t.lower()]
             for i, n in enumerate(matches[:5]):
                 if st.button(f"👤 {n}", key=f"{key}_sug_{i}", use_container_width=True):
                     st.session_state[f"{key}_cust_txt"] = n
                     rerun()
-    return t
+        return t
 
 
 def _receipts_box(folder, title="📎 صور التحويلات", key=None, collapsible=False):
