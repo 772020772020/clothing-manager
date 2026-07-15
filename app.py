@@ -265,6 +265,33 @@ def show_df(df, style=False):
         st.dataframe(df2, use_container_width=True, hide_index=True)
 
 
+def _customer_name_input(label, current, names, key):
+    """اختيار عميل من المسجلين (قابل للبحث) أو إضافة اسم جديد.
+    يمنع اختلاف الهجاء ويوحّد الكابيتال/سمول."""
+    NEW = "➕ عميل جديد..."
+    # نجهّز القائمة: العملاء المسجلون + خيار جديد
+    opts = list(names)
+    # لو بنعدّل قطعة واسمها مش في القائمة (نادراً)، نضيفه
+    if current and not any(current.strip().lower() == n.strip().lower() for n in opts):
+        opts = [current] + opts
+    opts = opts + [NEW]
+
+    # نحدد الاختيار الحالي
+    idx = 0
+    if current:
+        for i, n in enumerate(opts):
+            if n.strip().lower() == current.strip().lower():
+                idx = i
+                break
+    else:
+        idx = len(opts) - 1  # عميل جديد افتراضياً عند الإضافة
+
+    picked = st.selectbox(label, opts, index=idx, key=f"{key}_pick")
+    if picked == NEW:
+        return st.text_input("اكتب اسم العميل الجديد", value="", key=f"{key}_new").strip()
+    return picked
+
+
 def _receipts_box(folder, title="📎 صور التحويلات", key=None, collapsible=False):
     """صندوق رفع وعرض صور. collapsible=True يضعه داخل قسم قابل للطي."""
     k = key or folder
@@ -793,7 +820,10 @@ def _item_form(oid, item, form_key):
     k = form_key  # بادئة فريدة للحقول
 
     c1, c2 = st.columns(2)
-    customer = c1.text_input("اسم العميل", value=item["customer_name"] if is_edit else "", key=f"{k}_cust")
+    with c1:
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.customers_list(), key=f"{k}_cust")
     product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
     c3, c4, c5 = st.columns(3)
     with c3:
@@ -1116,7 +1146,10 @@ def _usa_item_form(oid, item, form_key):
     is_edit = item is not None
     k = form_key
     c1, c2 = st.columns(2)
-    customer = c1.text_input("اسم العميل", value=item["customer_name"] if is_edit else "", key=f"{k}_cust")
+    with c1:
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.usa_customers_list(), key=f"{k}_cust")
     product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
     c3, c4, c5 = st.columns(3)
     with c3:
