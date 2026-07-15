@@ -276,10 +276,10 @@ def _customer_name_input(label, current, names, key):
                    if t.lower() in n.strip().lower()
                    and n.strip().lower() != t.lower()]
         if matches:
-            st.caption("عملاء مسجلون مشابهون (اضغط لاستخدام الاسم):")
-            cols = st.columns(min(3, len(matches)))
-            for i, n in enumerate(matches[:6]):
-                if cols[i % len(cols)].button(n, key=f"{key}_sug_{i}"):
+            st.caption("👇 عملاء مسجلون مشابهون — اضغط لاستخدام الاسم:")
+            # بدون أعمدة (لأن الخانة نفسها داخل عمود، و Streamlit يمنع تداخل الأعمدة)
+            for i, n in enumerate(matches[:5]):
+                if st.button(f"👤 {n}", key=f"{key}_sug_{i}", use_container_width=True):
                     st.session_state[f"{key}_cust_txt"] = n
                     rerun()
     return t
