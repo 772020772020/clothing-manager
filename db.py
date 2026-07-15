@@ -238,10 +238,10 @@ class Database:
             ORDER BY o.order_number, i.id""", (day,), fetch="all")
 
     def items_of_customer(self, customer):
-        """كل قطع عميل معين."""
+        """كل قطع عميل معين (يتجاهل الكابيتال/سمول والمسافات)."""
         return self._exec("""SELECT i.*, o.order_number FROM items i
             JOIN orders o ON o.id=i.order_id
-            WHERE i.customer_name=%s
+            WHERE LOWER(TRIM(i.customer_name))=LOWER(TRIM(%s))
             ORDER BY o.order_date::date DESC, i.id ASC""", (customer,), fetch="all")
 
     def weight_dates(self):
@@ -252,7 +252,10 @@ class Database:
         return [r["weight_date"] for r in rows]
 
     def customers_list(self):
-        rows = self._exec("SELECT DISTINCT customer_name FROM items ORDER BY customer_name", fetch="all")
+        """أسماء العملاء بدون تكرار (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)."""
+        rows = self._exec("""SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name
+            FROM items WHERE TRIM(customer_name) <> ''
+            ORDER BY LOWER(TRIM(customer_name)), customer_name""", fetch="all")
         return [r["customer_name"] for r in rows]
 
     def delete_item(self, iid):
@@ -619,11 +622,14 @@ class Database:
     def usa_items_of_customer(self, name):
         return self._exec("""SELECT i.*, o.order_number, o.supplier_name FROM usa_items i
             JOIN usa_orders o ON o.id=i.order_id
-            WHERE i.customer_name=%s ORDER BY o.id DESC, i.id ASC""", (name,), fetch="all")
+            WHERE LOWER(TRIM(i.customer_name))=LOWER(TRIM(%s))
+            ORDER BY o.id DESC, i.id ASC""", (name,), fetch="all")
 
     def usa_customers_list(self):
-        rows = self._exec("""SELECT DISTINCT customer_name FROM usa_items
-            WHERE customer_name<>'' ORDER BY customer_name""", fetch="all")
+        """أسماء عملاء أمريكا بدون تكرار (يتجاهل الكابيتال/سمول)."""
+        rows = self._exec("""SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name
+            FROM usa_items WHERE TRIM(customer_name) <> ''
+            ORDER BY LOWER(TRIM(customer_name)), customer_name""", fetch="all")
         return [r["customer_name"] for r in rows]
 
     # ---------- لوحة معلومات أمريكا ----------
