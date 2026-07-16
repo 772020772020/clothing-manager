@@ -230,11 +230,11 @@ class Database:
             ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
 
     def items_by_weight_date(self, day):
-        """القطع اللي اتسجّل وزنها في يوم معين + أرباحها (بدون الملغي)."""
+        """القطع اللي اتسجّل وزنها في يوم معين (يشمل الفوري وخرج للقياس، بدون المرتجع)."""
         return self._exec("""SELECT i.*, o.order_number FROM items i
             JOIN orders o ON o.id=i.order_id
             WHERE i.weight_date=%s AND i.weight_grams>0
-              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+              AND i.status NOT IN ('Out of Stock','Cancelled')
             ORDER BY o.order_number, i.id""", (day,), fetch="all")
 
     def items_of_customer(self, customer):
@@ -325,7 +325,7 @@ class Database:
         """أيام الوصول (تسجيل الوزن) مع عدد القطع في كل يوم — للقائمة السريعة."""
         return self._exec("""SELECT weight_date, COUNT(*) c FROM items
             WHERE weight_date IS NOT NULL AND weight_grams>0
-              AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+              AND status NOT IN ('Out of Stock','Cancelled')
             GROUP BY weight_date ORDER BY weight_date DESC""", fetch="all")
 
     # ---------- تقارير ----------
