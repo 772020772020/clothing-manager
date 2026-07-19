@@ -892,12 +892,13 @@ def _item_form(oid, item, form_key):
                 db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date, new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
-                st.success("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
+                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
             else:
                 db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
                                weight, deposit, status_en, weight_date)
-                st.success("تم إضافة القطعة.")
+                _flash("تم إضافة القطعة.")
             st.cache_data.clear()
+            rerun()
 
 
 
@@ -972,7 +973,8 @@ def view_reports():
                     "سعر البيع": egp(it["selling_price_egp"]),
                     "إجمالي التكلفة": egp(it["total_cost_egp"]),
                     "الحالة": STATUS_AR.get(it["status"], it["status"]),
-                    "الربح": _china_profit_disp(it),
+                    # الفوري وخرج للقياس بصفر عشان صف الإجمالي يجمع صح
+                    "الربح": egp(0) if it["status"] in _OUT else egp(it["profit_egp"]),
                 })
             m1, m2, m3 = st.columns(3)
             m1.metric("عدد القطع الواصلة", len(arr))
@@ -1209,11 +1211,12 @@ def _usa_item_form(oid, item, form_key):
                 db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status,
                                    new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
-                st.success("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
+                _flash("تم نقل القطعة وتعديلها." if moved else "تم تعديل القطعة.")
             else:
                 db.usa_add_item(oid, customer, product, cost, sell, deposit, status)
-                st.success("تم إضافة القطعة.")
+                _flash("تم إضافة القطعة.")
             st.cache_data.clear()
+            rerun()
 
 
 def view_usa_dashboard():
