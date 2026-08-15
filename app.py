@@ -145,11 +145,13 @@ def _china_profit_disp(it):
 
 
 def _usa_profit_disp(it):
-    """نص عمود الربح لقطعة أمريكا (يراعي الفوري والقياس)."""
+    """نص عمود الربح لقطعة أمريكا (يراعي الفوري والقياس وانتظار الوزن)."""
     if it["status"] == "Ready For Sale":
         return "فوري (لسه)"
     if it["status"] == "Out For Fitting":
         return "خرج للقياس"
+    if (it["weight_grams"] or 0) <= 0 and it["profit_egp"] is None:
+        return "انتظار الوزن"
     return egp(it["profit_egp"])
 
 
@@ -898,6 +900,7 @@ def _item_form(oid, item, form_key):
                                weight, deposit, status_en, weight_date)
                 st.success("✅ تم إضافة القطعة.")
             st.cache_data.clear()
+            rerun()
 
 
 
@@ -1114,15 +1117,20 @@ def _build_backup():
     # أمريكا — الأوردرات
     usa_orders = pd.DataFrame([{
         "رقم الأوردر": o["order_number"], "التاريخ": o["order_date"],
+        "سعر دولار الشراء": o["purchase_usd_rate"], "سعر دولار الشحن": o["shipping_usd_rate"],
+        "سعر كيلو الشحن (دولار)": o["shipping_price_per_kg_usd"],
         "المورد": o["supplier_name"], "ملاحظات": o["notes"],
     } for o in db.usa_all_orders()])
 
     # أمريكا — القطع
     usa_items = pd.DataFrame([{
         "رقم الأوردر": r["order_number"], "المورد": r["supplier_name"], "التاريخ": r["order_date"],
-        "العميل": r["customer_name"], "المنتج": r["product_name"], "التكلفة": r["cost_egp"],
+        "العميل": r["customer_name"], "المنتج": r["product_name"],
+        "شراء (دولار)": r["purchase_price_usd"], "الوزن (جم)": r["weight_grams"],
         "سعر البيع": r["selling_price_egp"], "العربون": r["deposit_paid"],
-        "الحالة": USA_STATUS_AR.get(r["status"], r["status"]), "الربح": r["profit_egp"],
+        "الحالة": USA_STATUS_AR.get(r["status"], r["status"]),
+        "تكلفة الشراء": r["purchase_cost_egp"], "تكلفة الشحن": r["shipping_cost_egp"],
+        "إجمالي التكلفة": r["total_cost_egp"], "الربح": r["profit_egp"],
     } for r in db.usa_all_items_detailed()])
 
     # المصاريف
@@ -1159,9 +1167,11 @@ def _build_backup():
 #  نظام أمريكا (واجهات منفصلة)
 # ============================================================
 def _usa_item_form(oid, item, form_key):
-    """نموذج إضافة/تعديل قطعة أمريكا (حساب مبسّط: ربح = بيع − تكلفة)."""
+    """نموذج إضافة/تعديل قطعة أمريكا (نفس منطق الصين بالظبط: سعر بالدولار + وزن + شحن)."""
+    order = db.usa_get_order(oid)
     is_edit = item is not None
     k = form_key
+
     _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
     with _form_ctx:
         c1, c2 = st.columns(2)
@@ -1172,15 +1182,18 @@ def _usa_item_form(oid, item, form_key):
         product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
         c3, c4, c5 = st.columns(3)
         with c3:
-            cost = _num("تكلفة الأوردر (ج.م)", item["cost_egp"] if is_edit else 0, key=f"{k}_cost")
+            sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
         with c4:
-            sell = _num("سعر البيع (ج.م)", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+            buy_usd = _num("سعر الشراء بالدولار", item["purchase_price_usd"] if is_edit else 0, key=f"{k}_buy")
         with c5:
-            deposit = _num("العربون (ج.م)", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
-        cur_status = item["status"] if is_edit else "In Transit"
-        status = st.selectbox("الحالة", USA_STATUSES,
-                              index=USA_STATUSES.index(cur_status) if cur_status in USA_STATUSES else 0,
-                              format_func=lambda s: USA_STATUS_AR.get(s, s), key=f"{k}_status")
+            weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
+        c6, c7 = st.columns(2)
+        with c6:
+            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+        status_ar_list = [USA_STATUS_AR[s] for s in USA_STATUSES]
+        cur_status_ar = USA_STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
+        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
+        status_en = USA_STATUSES[status_ar_list.index(status_ar)]
 
         # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
         new_order_id = None
@@ -1193,41 +1206,68 @@ def _usa_item_form(oid, item, form_key):
             picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
                                         index=cur_idx, key=f"{k}_ord")
             new_order_id = ord_ids[ord_labels.index(picked_label)]
-        # معاينة الربح
-        profit = (sell or 0) - (cost or 0)
-        if status == "Ready For Sale":
-            st.caption("🏷️ فوري (للبيع): مش محسوب في الأرباح ولا الخسائر لحد ما يتباع. سيبه فوري لحد ما تبيعه، وبعدين غيّر الحالة واكتب سعر البيع.")
-        else:
-            st.caption(f"💰 الربح المتوقع: {egp(profit)}  |  المتبقي على العميل: {egp((sell or 0) - (deposit or 0))}")
 
-        submitted = st.form_submit_button("💾 حفظ", type="primary")
+        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
+        weight_date = None
+        if weight > 0:
+            existing = None
+            if is_edit and item.get("weight_date"):
+                try:
+                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    existing = date.today()
+            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
+            weight_date = wd.isoformat()
+
+        # معاينة الحساب
+        c = calc_item(buy_usd, weight, sell, order["purchase_usd_rate"],
+                      order["shipping_usd_rate"], order["shipping_price_per_kg_usd"])
+        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
+        if status_en == "Ready For Sale":
+            st.caption("🏷️ فوري (للبيع): مش محسوب في الأرباح ولا الخسائر لحد ما يتباع.")
+        else:
+            st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
+                       f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+
+        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
+        submitted = st.form_submit_button(label, type="primary")
 
     if submitted:
         if not customer.strip() and not product.strip():
             st.error("اكتب اسم العميل أو المنتج على الأقل.")
         else:
             if is_edit:
-                db.usa_update_item(item["id"], customer, product, cost, sell, deposit, status,
-                                   new_order_id=new_order_id)
+                db.usa_update_item(item["id"], customer.strip(), product.strip(), buy_usd, sell,
+                                   weight, deposit, status_en, weight_date, new_order_id=new_order_id)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
                 st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
             else:
-                db.usa_add_item(oid, customer, product, cost, sell, deposit, status)
+                db.usa_add_item(oid, customer.strip(), product.strip(), buy_usd, sell,
+                                weight, deposit, status_en, weight_date)
                 st.success("✅ تم إضافة القطعة.")
             st.cache_data.clear()
+            rerun()
 
 
 def view_usa_dashboard():
     st.header("📊 لوحة معلومات أمريكا")
     d = db.usa_dashboard()
-    a, b, c, e = st.columns(4)
-    a.metric("عدد الأوردرات", d["orders"])
-    b.metric("عدد القطع", d["pieces"])
-    c.metric("إجمالي المبيعات", egp(d["sales"]))
-    e.metric("صافي الربح", egp(d["profit"]))
-    a2, b2 = st.columns(2)
-    a2.metric("إجمالي التكاليف", egp(d["cost"]))
-    b2.metric("المتبقي على العملاء", egp(d["outstanding"]))
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("عدد الأوردرات", d["orders"])
+    c2.metric("عدد القطع", d["pieces"])
+    c3.metric("إجمالي المبيعات", egp(d["sales"]))
+    c4.metric("إجمالي التكاليف", egp(d["cost"]))
+    c5.metric("صافي الأرباح", egp(d["profit"]))
+
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("بانتظار الوزن", d["awaiting"])
+    c7.metric("في الطريق", d["in_transit"])
+    c8.metric("في المستودع", d["in_warehouse"])
+    c9.metric("تم التسليم", d["delivered"])
+    c10.metric("أرصدة مستحقة", egp(d["outstanding"]))
+
+    st.info(f"🔮 الربح المتوقع للقطع التي لم تصل بعد (بتقدير وزن 500ج لكل قطعة): **{egp(d.get('expected_profit', 0))}** — محسوب على **{d.get('expected_count', 0)} قطعة** لها سعر بيع وسعر شراء بالدولار. تقدير فقط ولا يؤثر على أي حساب.")
 
     _render_net_after_expenses()
 
@@ -1249,7 +1289,9 @@ def view_usa_dashboard():
                 "المورد": it["supplier_name"],
                 "العميل": it["customer_name"],
                 "المنتج": it["product_name"],
-                "التكلفة": egp(it["cost_egp"]),
+                "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "التكلفة": egp(it["total_cost_egp"]),
                 "سعر البيع": egp(it["selling_price_egp"]),
                 "الربح": _usa_profit_disp(it),
             })
@@ -1303,24 +1345,29 @@ def _render_usa_customer_search(key_prefix):
     if not chosen:
         return
     citems = db.usa_items_of_customer(chosen)
-    active = [it for it in citems if it["status"] not in ("Ready For Sale", "Out For Fitting")]
+    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")]
     tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
-    tot_cost = sum(it["cost_egp"] or 0 for it in active)
     tot_dep = sum(it["deposit_paid"] or 0 for it in active)
-    tot_profit = sum(it["profit_egp"] or 0 for it in active)
+    tot_bal = tot_sales - tot_dep
+    tot_usd = sum(it["purchase_price_usd"] or 0 for it in active)
+    tot_profit = sum((it["profit_egp"] or 0) for it in active if it["profit_egp"] is not None)
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("عدد القطع", len(citems))
     m2.metric("إجمالي البيع", egp(tot_sales))
     m3.metric("المدفوع (عربون)", egp(tot_dep))
-    m4.metric("المتبقي عليه", egp(tot_sales - tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_bal))
     m5.metric("صافي الربح", egp(tot_profit))
+    st.caption(f"إجمالي الشراء بالدولار لكل قطعه: {tot_usd:g} دولار")
+
     cdata = []
     for it in citems:
         cdata.append({
             "رقم الأوردر": it["order_number"],
             "المورد": it["supplier_name"],
             "المنتج": it["product_name"],
-            "التكلفة": egp(it["cost_egp"]),
+            "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+            "الوزن (جم)": f'{it["weight_grams"]:g}',
+            "التكلفة (ج.م)": egp(it["total_cost_egp"]),
             "سعر البيع": egp(it["selling_price_egp"]),
             "العربون": egp(it["deposit_paid"]),
             "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
@@ -1346,13 +1393,21 @@ def view_usa_orders():
         col1, col2 = st.columns(2)
         number = col1.text_input("رقم الأوردر", key="usa_no_num")
         order_date = col2.date_input("تاريخ الأوردر", value=date.today(), key="usa_no_date")
-        supplier = st.text_input("اسم المورد", key="usa_no_supplier")
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            buy_rate = _num("سعر الدولار وقت الشراء", 0, key="usa_no_buy")
+        with col4:
+            ship_rate = _num("سعر دولار الشحن (لاحقاً)", 0, key="usa_no_shiprate")
+        with col5:
+            ship_kg = _num("سعر كيلو الشحن بالدولار (لاحقاً)", 0, key="usa_no_shipkg")
+        supplier = st.text_input("اسم الموقع/المورد", key="usa_no_supplier")
         notes = st.text_input("ملاحظات", key="usa_no_notes")
         if st.button("حفظ الأوردر", type="primary", key="usa_no_save"):
             if not number.strip():
                 st.error("اكتب رقم الأوردر.")
             else:
-                db.usa_create_order(number.strip(), order_date.isoformat(), supplier.strip(), notes)
+                db.usa_create_order(number.strip(), order_date.isoformat(), buy_rate, ship_rate,
+                                    ship_kg, supplier.strip(), notes)
                 st.success("تم إضافة الأوردر.")
                 rerun()
 
@@ -1390,16 +1445,34 @@ def view_usa_order_details():
         go("usa_orders"); rerun()
     ctitle.header(f"أوردر أمريكا: {o['order_number']} • {o['order_date']}")
 
+    # أسعار الأوردر
+    with st.container(border=True):
+        st.subheader("أسعار الأوردر")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            buy_rate = _num("سعر الدولار وقت الشراء", o["purchase_usd_rate"], key=f"usa_rate_buy_{oid}")
+        with c2:
+            ship_rate = _num("سعر دولار الشحن", o["shipping_usd_rate"], key=f"usa_rate_ship_{oid}")
+        with c3:
+            ship_kg = _num("سعر كيلو الشحن بالدولار", o["shipping_price_per_kg_usd"], key=f"usa_rate_kg_{oid}")
+        st.caption("عند تعديل الأسعار يُعاد حساب كل القطع تلقائياً")
+        if st.button("💾 حفظ الأسعار وإعادة الحساب", type="primary", key=f"usa_save_rates_{oid}"):
+            db.usa_update_order(oid, o["order_number"], o["order_date"], buy_rate, ship_rate,
+                                ship_kg, o["supplier_name"] or "", o["notes"] or "")
+            st.success("تم الحفظ وإعادة الحساب.")
+            rerun()
+
     # معلومات الأوردر
     with st.container(border=True):
         st.subheader("معلومات الأوردر")
         c1, c2 = st.columns(2)
         new_num = c1.text_input("رقم الأوردر", value=o["order_number"], key=f"usa_num_{oid}")
-        new_supplier = c2.text_input("اسم المورد", value=o["supplier_name"] or "", key=f"usa_sup_{oid}")
+        new_supplier = c2.text_input("اسم الموقع/المورد", value=o["supplier_name"] or "", key=f"usa_sup_{oid}")
         new_notes = st.text_area("📝 ملاحظات", value=o["notes"] or "", key=f"usa_notes_{oid}")
         if st.button("💾 حفظ معلومات الأوردر", type="primary", key=f"usa_savord_{oid}"):
             db.usa_update_order(oid, new_num.strip() or o["order_number"], o["order_date"],
-                                new_supplier.strip(), new_notes)
+                                o["purchase_usd_rate"], o["shipping_usd_rate"],
+                                o["shipping_price_per_kg_usd"], new_supplier.strip(), new_notes)
             st.success("تم الحفظ.")
             rerun()
 
@@ -1418,10 +1491,12 @@ def view_usa_order_details():
             data.append({
                 "العميل": it["customer_name"],
                 "المنتج": it["product_name"],
-                "التكلفة": egp(it["cost_egp"]),
                 "سعر البيع": egp(it["selling_price_egp"]),
+                "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "تكلفة الشحن": egp(it["shipping_cost_egp"]),
+                "إجمالي التكلفة": egp(it["total_cost_egp"]),
                 "العربون": egp(it["deposit_paid"]),
-                "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
                 "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
                 "الربح": _usa_profit_disp(it),
             })
@@ -1445,57 +1520,153 @@ def view_usa_order_details():
     s = db.usa_order_summary(oid)
     st.divider()
     st.subheader("الإجماليات")
-    t1, t2, t3, t4, t5 = st.columns(5)
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
     t1.metric("عدد القطع", s["pieces"])
-    t2.metric("إجمالي التكلفة", egp(s["cost"]))
+    t2.metric("بانتظار الوزن", s["awaiting_weight"] or 0)
     t3.metric("إجمالي المبيعات", egp(s["sales"]))
-    t4.metric("الودائع المجمّعة", egp(s["deposits"]))
-    t5.metric("صافي الربح", egp(s["profit"]))
+    t4.metric("إجمالي التكلفة", egp(s["cost"]))
+    t5.metric("الودائع المجمّعة", egp(s["deposits"]))
+    t6.metric("صافي الربح", egp(s["profit"]))
 
 
 def view_usa_reports():
     st.header("📈 تقارير أمريكا")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["أرباح الأوردرات", "أرباح العملاء", "أرباح شهرية", "أرباح سنوية", "💸 المصاريف"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية",
+         "💸 المصاريف", "🔮 متوقع مقابل حقيقي", "💰 أرصدة مستحقة"])
+
     with tab1:
         rows = db.usa_report_by_order()
         df = pd.DataFrame([{
             "رقم الأوردر": r["order_number"], "المورد": r["supplier_name"],
             "التاريخ": r["order_date"], "عدد القطع": r["pieces"],
-            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
-            "الربح": round(r["profit"], 2),
+            "إجمالي الشراء (دولار)": round(r["usd_total"], 2),
+            "المبيعات": round(r["sales"], 2), "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
         show_df(df)
+
     with tab2:
         rows = db.usa_report_by_customer()
         df = pd.DataFrame([{
             "اسم العميل": r["customer_name"], "عدد القطع": r["pieces"],
-            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
+            "إجمالي الشراء (دولار)": round(r["usd_total"], 2),
+            "المبيعات": round(r["sales"], 2),
             "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
             "الربح": round(r["profit"], 2),
         } for r in rows])
         show_df(df)
+
         st.divider()
         st.markdown("##### 🔍 بحث عن عميل بالاسم")
         _render_usa_customer_search("usa_rep")
+
     with tab3:
+        st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
+        dcounts = db.usa_weight_dates_with_counts()
+        chosen_day = None
+        if dcounts:
+            day_opts = [f'{r["weight_date"]}  ({r["c"]} قطعة)' for r in dcounts]
+            day_vals = [r["weight_date"] for r in dcounts]
+            sel = st.selectbox("📅 أيام وصول الشحنات (اختر يوم)", ["— اختر من القائمة —"] + day_opts,
+                               key="usa_arr_quick_day")
+            if sel != "— اختر من القائمة —":
+                chosen_day = date.fromisoformat(day_vals[day_opts.index(sel)])
+        manual_day = st.date_input("أو اختر اليوم يدوياً", value=date.today(), key="usa_arr_day_manual")
+        if chosen_day is None:
+            chosen_day = manual_day
+        day_str = chosen_day.isoformat()
+        arr = db.usa_items_by_weight_date(day_str)
+        if arr:
+            adata = []
+            total_profit = 0.0
+            total_sales = 0.0
+            _OUT = ("Ready For Sale", "Out For Fitting")
+            for it in arr:
+                if it["status"] not in _OUT:
+                    total_profit += it["profit_egp"] or 0
+                    total_sales += it["selling_price_egp"] or 0
+                adata.append({
+                    "رقم الأوردر": it["order_number"],
+                    "العميل": it["customer_name"],
+                    "المنتج": it["product_name"],
+                    "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+                    "الوزن (جم)": f'{it["weight_grams"]:g}',
+                    "سعر البيع": egp(it["selling_price_egp"]),
+                    "إجمالي التكلفة": egp(it["total_cost_egp"]),
+                    "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+                    "الربح": egp(0) if it["status"] in _OUT else egp(it["profit_egp"]),
+                })
+            m1, m2, m3 = st.columns(3)
+            m1.metric("عدد القطع الواصلة", len(arr))
+            m2.metric("إجمالي مبيعاتها", egp(total_sales))
+            m3.metric("إجمالي ربحها", egp(total_profit))
+            show_df(pd.DataFrame(adata), style=True)
+        else:
+            st.info("لا توجد قطع سُجّل وزنها في هذا اليوم.")
+
+        st.divider()
+        _receipts_box(f"usa_shipping_{day_str}",
+                      title="🚚 مرفقات الشحن (الميزان / الحساب / التحويل)",
+                      key=f"usa_ship_{day_str}", collapsible=True)
+
+    with tab4:
         rows = db.usa_report_monthly()
         df = pd.DataFrame([{
-            "الشهر": r["period"], "عدد القطع": r["pieces"],
-            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
-            "الربح": round(r["profit"], 2),
+            "الشهر": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
         show_df(df)
-    with tab4:
+
+    with tab5:
         rows = db.usa_report_yearly()
         df = pd.DataFrame([{
-            "السنة": r["period"], "عدد القطع": r["pieces"],
-            "التكلفة": round(r["cost"], 2), "المبيعات": round(r["sales"], 2),
-            "الربح": round(r["profit"], 2),
+            "السنة": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
         } for r in rows])
         show_df(df)
-    with tab5:
+
+    with tab6:
         st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
         _render_expenses_manager("usa_exp")
+
+    with tab7:
+        st.markdown("##### 🔮 مقارنة الربح المتوقع بالحقيقي")
+        st.caption("للقطع التي كان لها ربح متوقع (تقدير 500ج) ثم وصل وزنها وعُرف ربحها الحقيقي.")
+        rows = db.usa_report_expected_vs_actual()
+        if rows:
+            data = []
+            for r in rows:
+                exp = r["expected"] or 0
+                act = r["actual"] or 0
+                data.append({
+                    "الأوردر": r["order_number"],
+                    "العميل": r["customer_name"],
+                    "المنتج": r["product_name"],
+                    "الوزن (جم)": f'{r["weight_grams"]:g}',
+                    "الربح المتوقع": round(exp, 2),
+                    "الربح الحقيقي": round(act, 2),
+                    "الفرق": round(act - exp, 2),
+                })
+            show_df(pd.DataFrame(data))
+            st.caption("الفرق = الحقيقي − المتوقع. لو موجب يبقى القطعة طلعت أحسن من المتوقع، ولو سالب أقل.")
+        else:
+            st.info("لا توجد قطع مكتملة الوزن للمقارنة بعد.")
+
+    with tab8:
+        st.markdown("##### 💰 العملاء الذين عليهم مبالغ مستحقة")
+        st.caption("العملاء الذين استلموا أو في الطريق ولم يدفعوا كامل المبلغ (يشمل تسليم آجل).")
+        rows = db.usa_report_outstanding_by_customer()
+        if rows:
+            data = [{
+                "اسم العميل": r["customer_name"],
+                "عدد القطع": r["pieces"],
+                "إجمالي البيع": round(r["sales"], 2),
+                "المدفوع (عربون)": round(r["deposits"], 2),
+                "المتبقي عليه": round(r["outstanding"], 2),
+            } for r in rows]
+            show_df(pd.DataFrame(data))
+        else:
+            st.info("لا توجد مبالغ مستحقة حالياً. 🎉")
 
 
 # ============================================================
