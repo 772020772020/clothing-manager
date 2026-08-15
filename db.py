@@ -27,17 +27,9 @@ STATUS_AR = {
     "Out of Stock": "نفذ من المصدر",
 }
 
-# ===== نظام أمريكا (حساب مبسّط: الربح = البيع − التكلفة) =====
-USA_STATUSES = ["In Transit", "In Warehouse", "Out For Delivery", "Delivered", "Delivered Unpaid", "Ready For Sale", "Out For Fitting"]
-USA_STATUS_AR = {
-    "In Transit": "في الطريق",
-    "In Warehouse": "في المستودع",
-    "Out For Delivery": "مع شركة الشحن",
-    "Delivered": "تم التسليم",
-    "Delivered Unpaid": "تسليم - آجل",
-    "Ready For Sale": "فوري (للبيع)",
-    "Out For Fitting": "خرج للقياس",
-}
+# ===== نظام أمريكا (نفس منطق الصين بالظبط: سعر دولار + وزن + شحن) =====
+USA_STATUSES = list(ITEM_STATUSES)
+USA_STATUS_AR = dict(STATUS_AR)
 
 
 def connect(cfg):
@@ -397,6 +389,24 @@ class Database:
             profit_egp DOUBLE PRECISION DEFAULT 0,
             status TEXT DEFAULT 'In Transit'
         )""")
+        # ترحيل: النظام الجديد لأمريكا (سعر دولار وقت الشراء + سعر دولار الشحن + سعر كيلو الشحن
+        # بالدولار + وزن القطعة) — بنفس منطق حساب الصين بالظبط. أوردرات/قطع الوسيط القديمة تفضل
+        # زي ما هي كتاريخ، والنظام الجديد يتطبق على القطع الجديدة فقط.
+        self._exec("ALTER TABLE usa_orders ADD COLUMN IF NOT EXISTS purchase_usd_rate DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_orders ADD COLUMN IF NOT EXISTS shipping_usd_rate DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_orders ADD COLUMN IF NOT EXISTS shipping_price_per_kg_usd DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS purchase_price_usd DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS weight_grams DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS weight_date TEXT")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS purchase_cost_egp DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS shipping_cost_egp DOUBLE PRECISION DEFAULT 0")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS total_cost_egp DOUBLE PRECISION DEFAULT 0")
+        # نسخ تكلفة قطع نظام الوسيط القديم لعمود التكلفة الجديد مرة واحدة، عشان تفضل
+        # محسوبة صح في كل التقارير كما هي (بدون أي تغيير في قيمتها الفعلية)
+        self._exec("""UPDATE usa_items SET total_cost_egp = cost_egp
+            WHERE purchase_price_usd = 0 AND weight_grams = 0
+              AND profit_egp IS NOT NULL AND (total_cost_egp IS NULL OR total_cost_egp = 0)
+              AND cost_egp <> 0""")
         # جدول المصاريف العامة (تخص الصين وأمريكا معاً)
         self._exec("""CREATE TABLE IF NOT EXISTS expenses (
             id SERIAL PRIMARY KEY,
@@ -530,17 +540,20 @@ class Database:
             COALESCE(SUM(amount),0) total FROM expenses GROUP BY period""", fetch="all")
 
     # ---------- أوردرات أمريكا ----------
-    def usa_create_order(self, number, date, supplier="", notes=""):
+    def usa_create_order(self, number, date, buy_rate=0, ship_rate=0, ship_kg=0, supplier="", notes=""):
         return self._exec(
-            """INSERT INTO usa_orders (order_number, order_date, supplier_name, notes)
-               VALUES (%s,%s,%s,%s) RETURNING id""",
-            (number, date, supplier, notes), fetch="id")
+            """INSERT INTO usa_orders (order_number, order_date, purchase_usd_rate,
+               shipping_usd_rate, shipping_price_per_kg_usd, supplier_name, notes)
+               VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (number, date, buy_rate, ship_rate, ship_kg, supplier, notes), fetch="id")
 
-    def usa_update_order(self, oid, number, date, supplier, notes=""):
+    def usa_update_order(self, oid, number, date, buy_rate, ship_rate, ship_kg, supplier, notes=""):
         self._exec(
-            """UPDATE usa_orders SET order_number=%s, order_date=%s, supplier_name=%s, notes=%s
+            """UPDATE usa_orders SET order_number=%s, order_date=%s, purchase_usd_rate=%s,
+               shipping_usd_rate=%s, shipping_price_per_kg_usd=%s, supplier_name=%s, notes=%s
                WHERE id=%s""",
-            (number, date, supplier, notes, oid))
+            (number, date, buy_rate, ship_rate, ship_kg, supplier, notes, oid))
+        self.usa_recalc_order(oid)
 
     def usa_delete_order(self, oid):
         self._exec("DELETE FROM usa_orders WHERE id=%s", (oid,))
@@ -560,36 +573,48 @@ class Database:
     def usa_order_summary(self, oid):
         return self._exec("""
             SELECT COUNT(*) pieces,
+                COALESCE(SUM(CASE WHEN weight_grams>0 THEN 1 ELSE 0 END),0) with_weight,
+                COALESCE(SUM(CASE WHEN weight_grams<=0 AND profit_egp IS NULL THEN 1 ELSE 0 END),0) awaiting_weight,
                 COALESCE(SUM(CASE WHEN status='Delivered' THEN 1 ELSE 0 END),0) delivered,
                 COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(cost_egp),0) cost,
                 COALESCE(SUM(deposit_paid),0) deposits,
                 COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
-                COALESCE(SUM(profit_egp),0) profit
-            FROM usa_items WHERE order_id=%s AND status NOT IN ('Ready For Sale','Out For Fitting')
+                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN total_cost_egp ELSE 0 END),0) cost,
+                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN profit_egp ELSE 0 END),0) profit
+            FROM usa_items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
         """, (oid,), fetch="one")
 
     # ---------- قطع أمريكا ----------
-    def usa_add_item(self, order_id, customer, product, cost, sell, deposit, status="In Transit"):
-        profit = (sell or 0) - (cost or 0)
-        return self._exec(
-            """INSERT INTO usa_items (order_id, customer_name, product_name, cost_egp,
-               selling_price_egp, deposit_paid, profit_egp, status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (order_id, customer, product, cost, sell, deposit, profit, status), fetch="id")
+    def _usa_compute(self, oid, buy_usd, weight_g, sell):
+        o = self.usa_get_order(oid)
+        return calc_item(buy_usd, weight_g, sell, o["purchase_usd_rate"],
+                         o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
 
-    def usa_update_item(self, item_id, customer, product, cost, sell, deposit, status, new_order_id=None):
-        profit = (sell or 0) - (cost or 0)
-        if new_order_id is not None:
-            self._exec(
-                """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, cost_egp=%s,
-                   selling_price_egp=%s, deposit_paid=%s, profit_egp=%s, status=%s WHERE id=%s""",
-                (new_order_id, customer, product, cost, sell, deposit, profit, status, item_id))
-        else:
-            self._exec(
-                """UPDATE usa_items SET customer_name=%s, product_name=%s, cost_egp=%s,
-                   selling_price_egp=%s, deposit_paid=%s, profit_egp=%s, status=%s WHERE id=%s""",
-                (customer, product, cost, sell, deposit, profit, status, item_id))
+    def usa_add_item(self, order_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
+                     status="Order Registered", weight_date=None):
+        c = self._usa_compute(order_id, buy_usd, weight_g, sell)
+        return self._exec(
+            """INSERT INTO usa_items (order_id, customer_name, product_name, purchase_price_usd,
+               weight_grams, selling_price_egp, deposit_paid, status, weight_date,
+               purchase_cost_egp, shipping_cost_egp, total_cost_egp, cost_egp, profit_egp)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (order_id, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
+             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
+             c["profit_egp"]), fetch="id")
+
+    def usa_update_item(self, item_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
+                        status="Order Registered", weight_date=None, new_order_id=None):
+        it = self.usa_get_item(item_id)
+        target_oid = new_order_id if new_order_id is not None else it["order_id"]
+        c = self._usa_compute(target_oid, buy_usd, weight_g, sell)
+        self._exec(
+            """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, purchase_price_usd=%s,
+               weight_grams=%s, selling_price_egp=%s, deposit_paid=%s, status=%s, weight_date=%s,
+               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, cost_egp=%s, profit_egp=%s
+               WHERE id=%s""",
+            (target_oid, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
+             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
+             c["profit_egp"], item_id))
 
     def usa_delete_item(self, item_id):
         self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
@@ -608,14 +633,78 @@ class Database:
         rows = self._exec("SELECT status, COUNT(*) c FROM usa_items GROUP BY status", fetch="all")
         return {r["status"]: r["c"] for r in rows}
 
+    def usa_get_item(self, iid):
+        return self._exec("SELECT * FROM usa_items WHERE id=%s", (iid,), fetch="one")
+
     def usa_items_of(self, order_id):
         return self._exec("SELECT * FROM usa_items WHERE order_id=%s ORDER BY id ASC",
                           (order_id,), fetch="all")
 
+    def usa_recalc_order(self, oid):
+        o = self.usa_get_order(oid)
+        if not o:
+            return
+        for it in self.usa_items_of(oid):
+            c = calc_item(it["purchase_price_usd"], it["weight_grams"], it["selling_price_egp"],
+                          o["purchase_usd_rate"], o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
+            self._exec(
+                """UPDATE usa_items SET purchase_cost_egp=%s, shipping_cost_egp=%s,
+                   total_cost_egp=%s, cost_egp=%s, profit_egp=%s WHERE id=%s""",
+                (c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
+                 c["profit_egp"], it["id"]))
+
+    def usa_items_by_weight_date(self, day):
+        """قطع أمريكا اللي اتسجّل وزنها في يوم معين."""
+        return self._exec("""SELECT i.*, o.order_number FROM usa_items i
+            JOIN usa_orders o ON o.id=i.order_id
+            WHERE i.weight_date=%s AND i.weight_grams>0
+              AND i.status NOT IN ('Out of Stock','Cancelled')
+            ORDER BY o.order_number, i.id""", (day,), fetch="all")
+
+    def usa_weight_dates_with_counts(self):
+        """أيام وصول شحنات أمريكا (تسجيل الوزن) مع عدد القطع في كل يوم."""
+        return self._exec("""SELECT weight_date, COUNT(*) c FROM usa_items
+            WHERE weight_date IS NOT NULL AND weight_grams>0
+              AND status NOT IN ('Out of Stock','Cancelled')
+            GROUP BY weight_date ORDER BY weight_date DESC""", fetch="all")
+
+    def usa_report_expected_vs_actual(self):
+        """مقارنة الربح المتوقع (تقدير 500ج) بالربح الحقيقي لقطع أمريكا التي وصل وزنها."""
+        return self._exec("""
+            SELECT o.order_number, i.customer_name, i.product_name,
+                i.selling_price_egp, i.purchase_price_usd, i.weight_grams, i.profit_egp AS actual,
+                (i.selling_price_egp - (
+                    i.purchase_price_usd * o.purchase_usd_rate
+                    + 0.5 * o.shipping_price_per_kg_usd * o.shipping_usd_rate
+                )) AS expected
+            FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
+            WHERE i.weight_grams > 0
+              AND i.selling_price_egp > 0
+              AND i.purchase_price_usd > 0
+              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC
+        """, fetch="all")
+
+    def usa_report_outstanding_by_customer(self):
+        """عملاء أمريكا الذين عليهم مبالغ مستحقة، مرتّبين تنازلياً."""
+        return self._exec("""
+            SELECT customer_name,
+                COUNT(*) pieces,
+                COALESCE(SUM(selling_price_egp),0) sales,
+                COALESCE(SUM(deposit_paid),0) deposits,
+                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
+            FROM usa_items
+            WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Delivered','Order Registered')
+            GROUP BY customer_name
+            HAVING COALESCE(SUM(selling_price_egp-deposit_paid),0) > 0
+            ORDER BY outstanding DESC
+        """, fetch="all")
+
     def usa_all_items_detailed(self):
         return self._exec("""SELECT o.order_number, o.supplier_name, o.order_date,
-            i.customer_name, i.product_name, i.cost_egp, i.selling_price_egp,
-            i.deposit_paid, i.profit_egp, i.status
+            i.customer_name, i.product_name, i.purchase_price_usd, i.weight_grams, i.cost_egp,
+            i.selling_price_egp, i.deposit_paid, i.profit_egp, i.status,
+            i.purchase_cost_egp, i.shipping_cost_egp, i.total_cost_egp
             FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
             ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
 
@@ -638,52 +727,77 @@ class Database:
         total_pieces = self._exec("SELECT COUNT(*) c FROM usa_items", fetch="one")["c"]
         r = self._exec("""
             SELECT
+                COALESCE(SUM(CASE WHEN weight_grams<=0 AND profit_egp IS NULL THEN 1 ELSE 0 END),0) awaiting,
                 COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(cost_egp),0) cost,
-                COALESCE(SUM(profit_egp),0) profit,
-                COALESCE(SUM(CASE WHEN status <> 'Delivered'
+                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN total_cost_egp ELSE 0 END),0) cost,
+                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN profit_egp ELSE 0 END),0) profit,
+                COALESCE(SUM(CASE WHEN status NOT IN ('Delivered','Order Registered')
                     THEN selling_price_egp-deposit_paid ELSE 0 END),0) outstanding
-            FROM usa_items WHERE status NOT IN ('Ready For Sale','Out For Fitting')
+            FROM usa_items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
         """, fetch="one")
+        # الربح المتوقع للقطع التي لم يصلها وزن بعد (تقدير وزن 500 جرام) — نفس منطق الصين
+        ep = self._exec("""
+            SELECT
+                COALESCE(SUM(
+                    i.selling_price_egp - (
+                        i.purchase_price_usd * o.purchase_usd_rate
+                        + 0.5 * o.shipping_price_per_kg_usd * o.shipping_usd_rate
+                    )
+                ),0) expected,
+                COUNT(*) cnt
+            FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
+            WHERE i.weight_grams<=0
+              AND i.selling_price_egp > 0
+              AND i.purchase_price_usd > 0
+              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Order Registered')
+        """, fetch="one")
+        sc_rows = self._exec("SELECT status, COUNT(*) c FROM usa_items GROUP BY status", fetch="all")
+        sc = {row["status"]: row["c"] for row in sc_rows}
         return {
-            "orders": orders, "pieces": total_pieces, "sales": r["sales"],
-            "cost": r["cost"], "profit": r["profit"], "outstanding": r["outstanding"],
+            "orders": orders, "pieces": total_pieces, "awaiting": r["awaiting"] or 0,
+            "sales": r["sales"], "cost": r["cost"], "profit": r["profit"],
+            "outstanding": r["outstanding"], "expected_profit": ep["expected"],
+            "expected_count": ep["cnt"],
+            "in_transit": sc.get("In Transit", 0), "in_warehouse": sc.get("In Warehouse", 0),
+            "delivered": sc.get("Delivered", 0),
         }
 
     # ---------- تقارير أمريكا ----------
     def usa_report_by_order(self):
         return self._exec("""SELECT o.order_number, o.order_date, o.supplier_name, COUNT(i.id) pieces,
-            COALESCE(SUM(i.cost_egp),0) cost,
+            COALESCE(SUM(i.purchase_price_usd),0) usd_total,
+            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(i.profit_egp),0) profit
+            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
             FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
-                AND i.status NOT IN ('Ready For Sale','Out For Fitting')
+                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
             GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
 
     def usa_report_by_customer(self):
         return self._exec("""SELECT customer_name, COUNT(*) pieces,
-            COALESCE(SUM(cost_egp),0) cost,
+            COALESCE(SUM(purchase_price_usd),0) usd_total,
+            COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(selling_price_egp),0) sales,
             COALESCE(SUM(deposit_paid),0) deposits,
             COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
-            COALESCE(SUM(profit_egp),0) profit
-            FROM usa_items WHERE status NOT IN ('Ready For Sale','Out For Fitting')
+            COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN profit_egp ELSE 0 END),0) profit
+            FROM usa_items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
             GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
     def usa_report_monthly(self):
         return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
-            COALESCE(SUM(i.cost_egp),0) cost,
+            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(i.profit_egp),0) profit
+            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
             FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
-                AND i.status NOT IN ('Ready For Sale','Out For Fitting')
+                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def usa_report_yearly(self):
         return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY') period, COUNT(i.id) pieces,
-            COALESCE(SUM(i.cost_egp),0) cost,
+            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(i.profit_egp),0) profit
+            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
             FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
-                AND i.status NOT IN ('Ready For Sale','Out For Fitting')
+                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
             GROUP BY period ORDER BY period DESC""", fetch="all")
