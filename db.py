@@ -244,10 +244,17 @@ class Database:
         return [r["weight_date"] for r in rows]
 
     def customers_list(self):
-        """أسماء العملاء بدون تكرار (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)."""
-        rows = self._exec("""SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name
-            FROM items WHERE TRIM(customer_name) <> ''
-            ORDER BY LOWER(TRIM(customer_name)), customer_name""", fetch="all")
+        """أسماء العملاء بدون تكرار من الصين وأمريكا مجتمعين في قاعدة واحدة
+        (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)، عشان لما تكتب اسم عميل في
+        أي حتة يبقى مقترح في الصين وأمريكا مع بعض."""
+        rows = self._exec("""
+            SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name FROM (
+                SELECT customer_name FROM items WHERE TRIM(customer_name) <> ''
+                UNION ALL
+                SELECT customer_name FROM usa_items WHERE TRIM(customer_name) <> ''
+            ) c
+            ORDER BY LOWER(TRIM(customer_name)), customer_name
+        """, fetch="all")
         return [r["customer_name"] for r in rows]
 
     def delete_item(self, iid):
@@ -715,11 +722,8 @@ class Database:
             ORDER BY o.id DESC, i.id ASC""", (name,), fetch="all")
 
     def usa_customers_list(self):
-        """أسماء عملاء أمريكا بدون تكرار (يتجاهل الكابيتال/سمول)."""
-        rows = self._exec("""SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name
-            FROM usa_items WHERE TRIM(customer_name) <> ''
-            ORDER BY LOWER(TRIM(customer_name)), customer_name""", fetch="all")
-        return [r["customer_name"] for r in rows]
+        """نفس قاعدة أسامي العملاء الموحّدة (الصين وأمريكا مع بعض)."""
+        return self.customers_list()
 
     # ---------- لوحة معلومات أمريكا ----------
     def usa_dashboard(self):
