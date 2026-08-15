@@ -588,6 +588,10 @@ def view_dashboard():
     _render_net_after_expenses()
 
     st.divider()
+    st.subheader("👤 بحث عن عميل")
+    _render_customer_search("dash")
+
+    st.divider()
     # استعراض القطع حسب الحالة + الدخول على أي قطعة وتعديلها
     st.subheader("🔍 استعراض القطع حسب الحالة")
     status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
@@ -632,10 +636,6 @@ def view_dashboard():
             _item_form(oid_of_item, item=chosen_item, form_key=f"dash_edit_{chosen_id}")
     else:
         st.info("لا توجد قطع في هذه الحالة.")
-
-    st.divider()
-    st.subheader("👤 بحث عن عميل")
-    _render_customer_search("dash")
 
     st.divider()
     st.subheader("آخر الأوردرات")
@@ -1272,6 +1272,10 @@ def view_usa_dashboard():
     _render_net_after_expenses()
 
     st.divider()
+    st.subheader("👤 بحث عن عميل")
+    _render_usa_customer_search("usa_dash")
+
+    st.divider()
     # استعراض القطع حسب الحالة (نفس ترتيب الصين)
     st.subheader("🔍 استعراض القطع حسب الحالة")
     counts = db.usa_status_counts()
@@ -1309,10 +1313,6 @@ def view_usa_dashboard():
             _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"usa_dash_edit_{chosen_item['id']}")
     else:
         st.info("لا توجد قطع في هذه الحالة.")
-
-    st.divider()
-    st.subheader("👤 بحث عن عميل")
-    _render_usa_customer_search("usa_dash")
 
     st.divider()
     st.subheader("آخر أوردرات أمريكا")
