@@ -243,6 +243,31 @@ class Database:
             ORDER BY weight_date DESC""", fetch="all")
         return [r["weight_date"] for r in rows]
 
+    # ---------- بيانات العملاء (عنوان + تليفون) — موحّدة بين الصين وأمريكا ----------
+    def customers_init(self):
+        self._exec("""CREATE TABLE IF NOT EXISTS customers (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            name_key TEXT UNIQUE NOT NULL,
+            phone TEXT DEFAULT '',
+            address TEXT DEFAULT ''
+        )""")
+
+    def get_customer_info(self, name):
+        return self._exec("SELECT * FROM customers WHERE name_key=LOWER(TRIM(%s))",
+                          (name,), fetch="one")
+
+    def save_customer_info(self, name, phone, address):
+        name = (name or "").strip()
+        if not name:
+            return
+        self._exec("""
+            INSERT INTO customers (name, name_key, phone, address)
+            VALUES (%s, LOWER(TRIM(%s)), %s, %s)
+            ON CONFLICT (name_key) DO UPDATE SET
+                name=EXCLUDED.name, phone=EXCLUDED.phone, address=EXCLUDED.address
+        """, (name, name, phone or "", address or ""))
+
     def customers_list(self):
         """أسماء العملاء بدون تكرار من الصين وأمريكا مجتمعين في قاعدة واحدة
         (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)، عشان لما تكتب اسم عميل في
