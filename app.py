@@ -114,13 +114,17 @@ def get_db():
 
 db = get_db()
 
-# إنشاء جداول أمريكا تلقائياً لو مش موجودة (مرة واحدة)
+# إنشاء جداول أمريكا وبيانات العملاء تلقائياً لو مش موجودة (مرة واحدة)
 @st.cache_resource
 def _ensure_usa_tables():
     try:
         db.usa_init()
     except Exception as e:
         st.warning(f"تنبيه: لم يتم إنشاء جداول أمريكا تلقائياً ({e}).")
+    try:
+        db.customers_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جدول بيانات العملاء تلقائياً ({e}).")
     return True
 
 _ensure_usa_tables()
@@ -431,6 +435,21 @@ else:
 st.divider()
 
 
+def _customer_info_box(name, key_prefix):
+    """صندوق بيانات تواصل العميل (تليفون + عنوان) — موحّد بين الصين وأمريكا."""
+    info = db.get_customer_info(name)
+    phone = info["phone"] if info else ""
+    address = info["address"] if info else ""
+    with st.expander("📇 بيانات التواصل (تليفون + عنوان)", expanded=bool(phone or address)):
+        c1, c2 = st.columns(2)
+        new_phone = c1.text_input("رقم التليفون", value=phone, key=f"{key_prefix}_phone")
+        new_address = c2.text_input("العنوان", value=address, key=f"{key_prefix}_address")
+        if st.button("💾 حفظ بيانات العميل", key=f"{key_prefix}_save_info"):
+            db.save_customer_info(name, new_phone.strip(), new_address.strip())
+            st.success("✅ تم حفظ بيانات العميل.")
+            rerun()
+
+
 def _render_customer_search(key_prefix):
     """اختيار عميل (قابل للبحث بالكتابة) + ملخصه وكل قطعه."""
     custs = db.customers_list()
@@ -443,6 +462,7 @@ def _render_customer_search(key_prefix):
         key=f"{key_prefix}_cust")
     if not chosen_cust:
         return
+    _customer_info_box(chosen_cust, key_prefix)
     citems = db.items_of_customer(chosen_cust)
     # نستبعد القطع المرتجعة والفوري (غير المباعة) من كل الحسابات
     active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")]
@@ -1344,6 +1364,7 @@ def _render_usa_customer_search(key_prefix):
         key=f"{key_prefix}_cust")
     if not chosen:
         return
+    _customer_info_box(chosen, key_prefix)
     citems = db.usa_items_of_customer(chosen)
     active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")]
     tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
