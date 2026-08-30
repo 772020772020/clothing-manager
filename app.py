@@ -396,21 +396,25 @@ USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 _cur_view = st.session_state.get("view", "dashboard")
 in_usa = _cur_view in USA_VIEWS
 in_ledger = _cur_view == "ledger"
+in_shipping = _cur_view == "shipping_combined"
 
-# ===== التبويبات الكبيرة: الصين / أمريكا / حسابات شخصية =====
-big1, big2, big3 = st.columns(3)
+# ===== التبويبات الكبيرة: الصين / أمريكا / مع شركة الشحن / حسابات شخصية =====
+big1, big2, big3, big4 = st.columns(4)
 if big1.button("🇨🇳 الصين", use_container_width=True,
-               type=("primary" if (not in_usa and not in_ledger) else "secondary")):
+               type=("primary" if (not in_usa and not in_ledger and not in_shipping) else "secondary")):
     go("dashboard"); rerun()
 if big2.button("🇺🇸 أمريكا", use_container_width=True,
                type=("primary" if in_usa else "secondary")):
     go("usa_dashboard"); rerun()
-if big3.button("💰 حسابات شخصية", use_container_width=True,
+if big3.button("🚚 مع شركة الشحن", use_container_width=True,
+               type=("primary" if in_shipping else "secondary")):
+    go("shipping_combined"); rerun()
+if big4.button("💰 حسابات شخصية", use_container_width=True,
                type=("primary" if in_ledger else "secondary")):
     go("ledger"); rerun()
 
 # ===== أقسام النظام المختار =====
-if in_ledger:
+if in_ledger or in_shipping:
     pass  # صفحة مستقلة بلا أقسام
 elif in_usa:
     n1, n2, n3, n4 = st.columns(4)
@@ -1903,6 +1907,44 @@ def _render_persons_ledger():
         st.info("لا توجد حركات بعد لهذا الشخص. أضف حركة من الأعلى.")
 
 
+def view_shipping_combined():
+    st.header("🚚 مع شركة الشحن")
+    st.caption("كل القطع اللي حالتها \"مع شركة الشحن\" في الصين وأمريكا مع بعض في مكان واحد.")
+
+    cn_items = db.items_by_status("Out For Delivery")
+    usa_items = db.usa_items_by_status("Out For Delivery")
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("قطع الصين", len(cn_items))
+    m2.metric("قطع أمريكا", len(usa_items))
+    m3.metric("الإجمالي", len(cn_items) + len(usa_items))
+
+    if not cn_items and not usa_items:
+        st.info("لا توجد قطع مع شركة الشحن حالياً.")
+        return
+
+    rows = []
+    for it in cn_items:
+        rows.append({
+            "المصدر": "🇨🇳 الصين",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "الربح": _china_profit_disp(it),
+        })
+    for it in usa_items:
+        rows.append({
+            "المصدر": "🇺🇸 أمريكا",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "الربح": _usa_profit_disp(it),
+        })
+    show_df(pd.DataFrame(rows))
+
+
 # ============================================================
 #  التوجيه
 # ============================================================
@@ -1924,5 +1966,7 @@ elif view == "usa_order_details":
     view_usa_order_details()
 elif view == "usa_reports":
     view_usa_reports()
+elif view == "shipping_combined":
+    view_shipping_combined()
 elif view == "ledger":
     view_ledger()
