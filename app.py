@@ -1914,34 +1914,58 @@ def view_shipping_combined():
     cn_items = db.items_by_status("Out For Delivery")
     usa_items = db.usa_items_by_status("Out For Delivery")
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("قطع الصين", len(cn_items))
-    m2.metric("قطع أمريكا", len(usa_items))
-    m3.metric("الإجمالي", len(cn_items) + len(usa_items))
-
     if not cn_items and not usa_items:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("قطع الصين", 0)
+        m2.metric("قطع أمريكا", 0)
+        m3.metric("الإجمالي", 0)
         st.info("لا توجد قطع مع شركة الشحن حالياً.")
         return
 
     rows = []
+    total_sales = 0.0
+    total_deposit = 0.0
     for it in cn_items:
+        sell = it["selling_price_egp"] or 0
+        dep = it["deposit_paid"] or 0
+        total_sales += sell
+        total_deposit += dep
         rows.append({
             "المصدر": "🇨🇳 الصين",
             "أوردر": it["order_number"],
             "العميل": it["customer_name"],
             "المنتج": it["product_name"],
-            "سعر البيع": egp(it["selling_price_egp"]),
+            "سعر البيع": egp(sell),
+            "العربون": egp(dep),
+            "الصافي بعد العربون": egp(sell - dep),
             "الربح": _china_profit_disp(it),
         })
     for it in usa_items:
+        sell = it["selling_price_egp"] or 0
+        dep = it["deposit_paid"] or 0
+        total_sales += sell
+        total_deposit += dep
         rows.append({
             "المصدر": "🇺🇸 أمريكا",
             "أوردر": it["order_number"],
             "العميل": it["customer_name"],
             "المنتج": it["product_name"],
-            "سعر البيع": egp(it["selling_price_egp"]),
+            "سعر البيع": egp(sell),
+            "العربون": egp(dep),
+            "الصافي بعد العربون": egp(sell - dep),
             "الربح": _usa_profit_disp(it),
         })
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("قطع الصين", len(cn_items))
+    m2.metric("قطع أمريكا", len(usa_items))
+    m3.metric("الإجمالي", len(cn_items) + len(usa_items))
+
+    m4, m5, m6 = st.columns(3)
+    m4.metric("إجمالي سعر البيع", egp(total_sales))
+    m5.metric("إجمالي العربون المدفوع", egp(total_deposit))
+    m6.metric("الصافي اللي الشركة هتحصّله", egp(total_sales - total_deposit))
+
     show_df(pd.DataFrame(rows))
 
 
