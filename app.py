@@ -66,14 +66,20 @@ st.markdown("""
 import os as _os
 
 def _show_logo(width=180):
-    """يعرض اللوجو لو الملف موجود (logo.png بجوار app.py)."""
+    """يعرض اللوجو لو الملف موجود (logo.png بجوار app.py)، وإلا يعرض اسم المحل كلوجو نصي."""
     try:
         if _os.path.exists("logo.png"):
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
                 st.image("logo.png", width=width)
+            return
     except Exception:
         pass
+    st.markdown(
+        "<h1 style='text-align:center;font-family:Georgia,serif;letter-spacing:3px;"
+        "margin-bottom:0;'>✨ INFINITY BOUTIQUE ✨</h1>"
+        "<p style='text-align:center;color:gray;margin-top:0;'>Clothing Import Management</p>",
+        unsafe_allow_html=True)
 
 
 def _check_password():
@@ -386,11 +392,87 @@ if not _check_password():
     st.stop()
 
 
+def _customer_info_box(name, key_prefix):
+    """صندوق بيانات تواصل العميل (تليفون + عنوان) — موحّد بين الصين وأمريكا."""
+    info = db.get_customer_info(name)
+    phone = info["phone"] if info else ""
+    address = info["address"] if info else ""
+    with st.expander("📇 بيانات التواصل (تليفون + عنوان)", expanded=bool(phone or address)):
+        c1, c2 = st.columns(2)
+        new_phone = c1.text_input("رقم التليفون", value=phone, key=f"{key_prefix}_phone")
+        new_address = c2.text_input("العنوان", value=address, key=f"{key_prefix}_address")
+        if st.button("💾 حفظ بيانات العميل", key=f"{key_prefix}_save_info"):
+            db.save_customer_info(name, new_phone.strip(), new_address.strip())
+            st.success("✅ تم حفظ بيانات العميل.")
+            rerun()
+
+
+def _render_global_customer_search():
+    """بحث موحّد باسم العميل يجيب كل أوردراته من الصين وأمريكا مع بعض."""
+    custs = db.customers_list()
+    if not custs:
+        return
+    chosen = st.selectbox(
+        "🔎 ابحث عن عميل بالاسم (الصين وأمريكا مع بعض)",
+        custs, index=None, placeholder="ابدأ الكتابة للبحث...",
+        key="global_cust_search")
+    if not chosen:
+        return
+    _customer_info_box(chosen, "global_search")
+
+    cn_items = db.items_of_customer(chosen)
+    usa_items = db.usa_items_of_customer(chosen)
+    _EXCLUDE = ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")
+    active = [it for it in cn_items if it["status"] not in _EXCLUDE] + \
+             [it for it in usa_items if it["status"] not in _EXCLUDE]
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in active)
+    tot_profit = sum((it["profit_egp"] or 0) for it in active if it["profit_egp"] is not None)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("عدد القطع", len(cn_items) + len(usa_items))
+    m2.metric("إجمالي البيع", egp(tot_sales))
+    m3.metric("المدفوع (عربون)", egp(tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_sales - tot_dep))
+    m5.metric("صافي الربح", egp(tot_profit))
+
+    rows = []
+    for it in cn_items:
+        rows.append({
+            "المصدر": "🇨🇳 الصين",
+            "رقم الأوردر": it["order_number"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _china_profit_disp(it),
+        })
+    for it in usa_items:
+        rows.append({
+            "المصدر": "🇺🇸 أمريكا",
+            "رقم الأوردر": it["order_number"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _usa_profit_disp(it),
+        })
+    if rows:
+        show_df(pd.DataFrame(rows))
+    else:
+        st.info("لا توجد قطع لهذا العميل.")
+
+
 # ============================================================
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
 _show_logo(140)
 st.markdown("#### 🧵 Infinity Boutique Management")
+
+with st.expander("🔎 بحث عن عميل (الصين وأمريكا مع بعض)", expanded=False):
+    _render_global_customer_search()
 
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 _cur_view = st.session_state.get("view", "dashboard")
@@ -438,20 +520,6 @@ else:
         st.cache_data.clear(); rerun()
 st.divider()
 
-
-def _customer_info_box(name, key_prefix):
-    """صندوق بيانات تواصل العميل (تليفون + عنوان) — موحّد بين الصين وأمريكا."""
-    info = db.get_customer_info(name)
-    phone = info["phone"] if info else ""
-    address = info["address"] if info else ""
-    with st.expander("📇 بيانات التواصل (تليفون + عنوان)", expanded=bool(phone or address)):
-        c1, c2 = st.columns(2)
-        new_phone = c1.text_input("رقم التليفون", value=phone, key=f"{key_prefix}_phone")
-        new_address = c2.text_input("العنوان", value=address, key=f"{key_prefix}_address")
-        if st.button("💾 حفظ بيانات العميل", key=f"{key_prefix}_save_info"):
-            db.save_customer_info(name, new_phone.strip(), new_address.strip())
-            st.success("✅ تم حفظ بيانات العميل.")
-            rerun()
 
 
 def _render_customer_search(key_prefix):
