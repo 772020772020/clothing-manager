@@ -828,16 +828,17 @@ def view_order_details():
             st.success("تم الحفظ وإعادة الحساب.")
             rerun()
 
-    # ملاحظات الأوردر
+    # معلومات الأوردر
     with st.container(border=True):
-        st.subheader("📝 ملاحظات الأوردر")
-        new_notes = st.text_area("الملاحظة", value=o["notes"] or "", key=f"notes_{oid}",
+        st.subheader("معلومات الأوردر")
+        new_num = st.text_input("رقم الأوردر", value=o["order_number"], key=f"num_{oid}")
+        new_notes = st.text_area("📝 ملاحظات", value=o["notes"] or "", key=f"notes_{oid}",
                                  placeholder="اكتب أي ملاحظة على الأوردر هنا...")
-        if st.button("💾 حفظ الملاحظة", key=f"save_notes_{oid}"):
-            db.update_order(oid, o["order_number"], o["order_date"],
+        if st.button("💾 حفظ معلومات الأوردر", type="primary", key=f"save_notes_{oid}"):
+            db.update_order(oid, new_num.strip() or o["order_number"], o["order_date"],
                             o["purchase_yuan_rate"], o["shipping_yuan_rate"],
                             o["shipping_price_per_kg_yuan"], new_notes)
-            st.success("تم حفظ الملاحظة.")
+            st.success("تم الحفظ.")
             rerun()
 
     # صور تحويلات فلوس العملاء لهذا الأوردر
@@ -895,6 +896,15 @@ def view_order_details():
     t3.metric("إجمالي المبيعات", egp(s["sales"]))
     t4.metric("الودائع المجمّعة", egp(s["deposits"]))
     t5.metric("صافي الربح", egp(s["profit"]))
+
+    st.divider()
+    with st.expander("🗑️ حذف الأوردر نهائياً"):
+        st.warning("سيتم حذف الأوردر وكل القطع اللي جواه، ومفيش رجوع بعد الحذف.")
+        if st.button("تأكيد حذف الأوردر", key=f"del_order_{oid}"):
+            db.delete_order(oid)
+            st.success("تم حذف الأوردر.")
+            go("orders")
+            rerun()
 
 
 def _num(label, value, key):
@@ -1620,6 +1630,15 @@ def view_usa_order_details():
     t4.metric("إجمالي التكلفة", egp(s["cost"]))
     t5.metric("الودائع المجمّعة", egp(s["deposits"]))
     t6.metric("صافي الربح", egp(s["profit"]))
+
+    st.divider()
+    with st.expander("🗑️ حذف الأوردر نهائياً"):
+        st.warning("سيتم حذف الأوردر وكل القطع اللي جواه، ومفيش رجوع بعد الحذف.")
+        if st.button("تأكيد حذف الأوردر", key=f"usa_del_order_{oid}"):
+            db.usa_delete_order(oid)
+            st.success("تم حذف الأوردر.")
+            go("usa_orders")
+            rerun()
 
 
 def view_usa_reports():
