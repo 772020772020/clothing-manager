@@ -269,18 +269,59 @@ class Database:
         """, (name, name, phone or "", address or ""))
 
     def customers_list(self):
-        """أسماء العملاء بدون تكرار من الصين وأمريكا مجتمعين في قاعدة واحدة
-        (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)، عشان لما تكتب اسم عميل في
-        أي حتة يبقى مقترح في الصين وأمريكا مع بعض."""
+        """أسماء العملاء بدون تكرار من الصين وأمريكا وبيانات العملاء المسجّلة
+        (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)."""
         rows = self._exec("""
             SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name FROM (
                 SELECT customer_name FROM items WHERE TRIM(customer_name) <> ''
                 UNION ALL
                 SELECT customer_name FROM usa_items WHERE TRIM(customer_name) <> ''
+                UNION ALL
+                SELECT name AS customer_name FROM customers WHERE TRIM(name) <> ''
             ) c
             ORDER BY LOWER(TRIM(customer_name)), customer_name
         """, fetch="all")
         return [r["customer_name"] for r in rows]
+
+    def customer_orders_count(self, name):
+        """عدد القطع المسجّلة على العميل في الصين وأمريكا مع بعض."""
+        a = self._exec("SELECT COUNT(*) c FROM items WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
+                       (name,), fetch="one")["c"]
+        b = self._exec("SELECT COUNT(*) c FROM usa_items WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
+                       (name,), fetch="one")["c"]
+        return a + b
+
+    def rename_customer(self, old, new):
+        """تغيير اسم عميل في كل أوردراته (الصين وأمريكا) وبياناته."""
+        old = (old or "").strip()
+        new = (new or "").strip()
+        if not old or not new:
+            return False
+        self._exec("UPDATE items SET customer_name=%s WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
+                   (new, old))
+        self._exec("UPDATE usa_items SET customer_name=%s WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
+                   (new, old))
+        old_info = self.get_customer_info(old)
+        if old_info:
+            new_info = self.get_customer_info(new)
+            if new_info and new_info["id"] != old_info["id"]:
+                # الاسم الجديد مسجّل قبل كده: ندمج (نكمّل الفاضي من بيانات القديم) ونشيل القديم
+                phone = new_info["phone"] or old_info["phone"] or ""
+                address = new_info["address"] or old_info["address"] or ""
+                self._exec("UPDATE customers SET name=%s, phone=%s, address=%s WHERE id=%s",
+                           (new, phone, address, new_info["id"]))
+                self._exec("DELETE FROM customers WHERE id=%s", (old_info["id"],))
+            else:
+                self._exec("UPDATE customers SET name=%s, name_key=LOWER(TRIM(%s)) WHERE id=%s",
+                           (new, new, old_info["id"]))
+        return True
+
+    def delete_customer(self, name):
+        """يمسح اسم عميل مالوش أي أوردرات. لو عليه أوردرات يرجع False من غير ما يمسح."""
+        if self.customer_orders_count(name) > 0:
+            return False
+        self._exec("DELETE FROM customers WHERE name_key=LOWER(TRIM(%s))", (name,))
+        return True
 
     def delete_item(self, iid):
         self._exec("DELETE FROM items WHERE id=%s", (iid,))
