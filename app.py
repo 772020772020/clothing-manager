@@ -465,6 +465,47 @@ def _render_global_customer_search():
         st.info("لا توجد قطع لهذا العميل.")
 
 
+def _render_customer_manager():
+    """تعديل اسم عميل مسجّل (يتغير في كل أوردراته) أو مسح اسم مالوش أوردرات."""
+    custs = db.customers_list()
+    if not custs:
+        st.info("لا يوجد عملاء مسجّلين.")
+        return
+    chosen = st.selectbox("اختر العميل", custs, index=None,
+                          placeholder="ابدأ الكتابة للبحث...", key="cust_mgr_pick")
+    if not chosen:
+        return
+    cnt = db.customer_orders_count(chosen)
+    st.caption(f"عدد القطع المسجّلة على العميل (الصين وأمريكا): {cnt}")
+
+    new_name = st.text_input("الاسم الجديد", value=chosen, key=f"cust_mgr_new_{chosen}")
+    if st.button("💾 حفظ الاسم الجديد", type="primary", key="cust_mgr_rename"):
+        nn = new_name.strip()
+        if not nn:
+            st.error("اكتب الاسم الجديد.")
+        elif nn == chosen:
+            st.info("الاسم زي ما هو، مفيش تغيير.")
+        else:
+            db.rename_customer(chosen, nn)
+            st.cache_data.clear()
+            _flash(f"✅ تم تغيير الاسم من \"{chosen}\" إلى \"{nn}\" في كل أوردراته.")
+            rerun()
+
+    st.divider()
+    if cnt > 0:
+        st.caption("🗑️ المسح متاح فقط للأسماء اللي مالهاش أوردرات.")
+    else:
+        with st.expander("🗑️ مسح هذا الاسم"):
+            st.warning("العميل ده مالوش أوردرات. هيتم مسح اسمه وبياناته (تليفون/عنوان).")
+            if st.button("تأكيد مسح الاسم", key="cust_mgr_delete"):
+                if db.delete_customer(chosen):
+                    st.cache_data.clear()
+                    _flash(f"✅ تم مسح الاسم \"{chosen}\".")
+                    rerun()
+                else:
+                    st.error("مينفعش تمسحه، عليه أوردرات.")
+
+
 # ============================================================
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
@@ -473,6 +514,9 @@ st.markdown("#### 🧵 Infinity Boutique Management")
 
 with st.expander("🔎 بحث عن عميل (الصين وأمريكا مع بعض)", expanded=False):
     _render_global_customer_search()
+
+with st.expander("✏️ تعديل / مسح اسم عميل", expanded=False):
+    _render_customer_manager()
 
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 _cur_view = st.session_state.get("view", "dashboard")
