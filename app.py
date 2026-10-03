@@ -131,6 +131,10 @@ def _ensure_usa_tables():
         db.customers_init()
     except Exception as e:
         st.warning(f"تنبيه: لم يتم إنشاء جدول بيانات العملاء تلقائياً ({e}).")
+    try:
+        db.catalog_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جدول كتالوج المنتج تلقائياً ({e}).")
     return True
 
 _ensure_usa_tables()
@@ -392,6 +396,70 @@ if not _check_password():
     st.stop()
 
 
+def _compose_product_name(ptype, brand, color, gender):
+    """يبني اسم المنتج من النوع/البراند/اللون/الجنس."""
+    parts = [p for p in [ptype, brand, color] if p]
+    name = " ".join(parts)
+    if gender:
+        name = f"{name} ({gender})" if name else gender
+    return name.strip()
+
+
+def _product_picker(k):
+    """4 خانات اختيار: النوع / البراند / اللون / الجنس. ترجع (type, brand, color, gender)."""
+    types = db.catalog_list("type")
+    brands = db.catalog_list("brand")
+    colors = db.catalog_list("color")
+    genders = db.catalog_list("gender")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        ptype = st.selectbox("النوع", types, index=None, placeholder="اختر...",
+                             key=f"{k}_ptype") if types else None
+        if not types:
+            st.caption("لا يوجد أنواع — ضِفها من ⚙️")
+    with c2:
+        brand = st.selectbox("البراند", brands, index=None, placeholder="اختر...",
+                             key=f"{k}_pbrand") if brands else None
+        if not brands:
+            st.caption("لا يوجد براندات — ضِفها من ⚙️")
+    with c3:
+        color = st.selectbox("اللون", colors, index=None, placeholder="اختر...",
+                             key=f"{k}_pcolor") if colors else None
+        if not colors:
+            st.caption("لا يوجد ألوان — ضِفها من ⚙️")
+    with c4:
+        gender = st.selectbox("الجنس", genders, index=None, placeholder="اختر...",
+                              key=f"{k}_pgender") if genders else None
+        if not genders:
+            st.caption("لا يوجد جنس — ضِفه من ⚙️")
+    return ptype, brand, color, gender
+
+
+def _render_catalog_manager():
+    """إدارة قيم كتالوج المنتج (نوع/براند/لون/جنس) — موحّدة بين الصين وأمريكا."""
+    labels = {"type": "النوع", "brand": "البراند", "color": "اللون", "gender": "الجنس"}
+    tabs = st.tabs([f"{labels[c]}" for c in labels])
+    for tab, cat in zip(tabs, labels):
+        with tab:
+            vals = db.catalog_list(cat)
+            if vals:
+                st.write("القيم الحالية: " + "، ".join(vals))
+            c1, c2 = st.columns([3, 1])
+            new_val = c1.text_input(f"إضافة {labels[cat]} جديد", key=f"cat_add_{cat}")
+            if c2.button("➕ إضافة", key=f"cat_addbtn_{cat}"):
+                if new_val.strip():
+                    db.catalog_add(cat, new_val.strip())
+                    st.cache_data.clear()
+                    rerun()
+            if vals:
+                del_val = st.selectbox(f"مسح {labels[cat]}", vals, index=None,
+                                       placeholder="اختر قيمة للمسح...", key=f"cat_del_{cat}")
+                if del_val and st.button("🗑️ مسح القيمة المختارة", key=f"cat_delbtn_{cat}"):
+                    db.catalog_delete(cat, del_val)
+                    st.cache_data.clear()
+                    rerun()
+
+
 def _customer_info_box(name, key_prefix):
     """صندوق بيانات تواصل العميل (تليفون + عنوان) — موحّد بين الصين وأمريكا."""
     info = db.get_customer_info(name)
@@ -517,6 +585,9 @@ with st.expander("🔎 بحث عن عميل (الصين وأمريكا مع بع
 
 with st.expander("✏️ تعديل / مسح اسم عميل", expanded=False):
     _render_customer_manager()
+
+with st.expander("⚙️ إدارة المنتج (النوع / البراند / اللون / الجنس)", expanded=False):
+    _render_catalog_manager()
 
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 _cur_view = st.session_state.get("view", "dashboard")
@@ -977,12 +1048,13 @@ def _item_form(oid, item, form_key):
     # نستخدم st.form: التعديلات لا تُعيد تحميل الصفحة، والحساب/الحفظ يتم مرة واحدة عند الضغط
     _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
     with _form_ctx:
-        c1, c2 = st.columns(2)
-        with c1:
-            customer = _customer_name_input("اسم العميل",
-                                            item["customer_name"] if is_edit else "",
-                                            db.customers_list(), key=f"{k}_cust", in_form=True)
-        product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.customers_list(), key=f"{k}_cust", in_form=True)
+        st.markdown("**تفاصيل المنتج**")
+        ptype, brand, color, gender = _product_picker(k)
+        if is_edit:
+            st.caption(f"الاسم الحالي: {item['product_name']} — سيب الخانات فاضية لو مش عايز تغيّره")
         c3, c4, c5 = st.columns(3)
         with c3:
             sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
@@ -1033,8 +1105,10 @@ def _item_form(oid, item, form_key):
         submitted = st.form_submit_button(label, type="primary")
 
     if submitted:
+        composed = _compose_product_name(ptype, brand, color, gender)
+        product = composed if composed else (item["product_name"] if is_edit else "")
         if not customer.strip() or not product.strip():
-            st.error("اكتب اسم العميل واسم المنتج.")
+            st.error("اكتب اسم العميل واختر تفاصيل المنتج (النوع على الأقل).")
         else:
             if is_edit:
                 db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
@@ -1320,12 +1394,13 @@ def _usa_item_form(oid, item, form_key):
 
     _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
     with _form_ctx:
-        c1, c2 = st.columns(2)
-        with c1:
-            customer = _customer_name_input("اسم العميل",
-                                            item["customer_name"] if is_edit else "",
-                                            db.usa_customers_list(), key=f"{k}_cust", in_form=True)
-        product = c2.text_input("اسم المنتج", value=item["product_name"] if is_edit else "", key=f"{k}_prod")
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.usa_customers_list(), key=f"{k}_cust", in_form=True)
+        st.markdown("**تفاصيل المنتج**")
+        ptype, brand, color, gender = _product_picker(k)
+        if is_edit:
+            st.caption(f"الاسم الحالي: {item['product_name']} — سيب الخانات فاضية لو مش عايز تغيّره")
         c3, c4, c5 = st.columns(3)
         with c3:
             sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
@@ -1379,8 +1454,10 @@ def _usa_item_form(oid, item, form_key):
         submitted = st.form_submit_button(label, type="primary")
 
     if submitted:
+        composed = _compose_product_name(ptype, brand, color, gender)
+        product = composed if composed else (item["product_name"] if is_edit else "")
         if not customer.strip() and not product.strip():
-            st.error("اكتب اسم العميل أو المنتج على الأقل.")
+            st.error("اكتب اسم العميل أو اختر تفاصيل المنتج على الأقل.")
         else:
             if is_edit:
                 db.usa_update_item(item["id"], customer.strip(), product.strip(), buy_usd, sell,
