@@ -268,6 +268,33 @@ class Database:
                 name=EXCLUDED.name, phone=EXCLUDED.phone, address=EXCLUDED.address
         """, (name, name, phone or "", address or ""))
 
+    # ---------- كتالوج المنتج (نوع / براند / لون / جنس) — موحّد بين الصين وأمريكا ----------
+    def catalog_init(self):
+        self._exec("""CREATE TABLE IF NOT EXISTS product_options (
+            id SERIAL PRIMARY KEY,
+            category TEXT NOT NULL,
+            value TEXT NOT NULL,
+            UNIQUE(category, value)
+        )""")
+
+    def catalog_list(self, category):
+        rows = self._exec(
+            "SELECT value FROM product_options WHERE category=%s ORDER BY LOWER(value)",
+            (category,), fetch="all")
+        return [r["value"] for r in rows]
+
+    def catalog_add(self, category, value):
+        value = (value or "").strip()
+        if not value:
+            return False
+        self._exec(
+            "INSERT INTO product_options (category, value) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+            (category, value))
+        return True
+
+    def catalog_delete(self, category, value):
+        self._exec("DELETE FROM product_options WHERE category=%s AND value=%s", (category, value))
+
     def customers_list(self):
         """أسماء العملاء بدون تكرار من الصين وأمريكا وبيانات العملاء المسجّلة
         (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)."""
