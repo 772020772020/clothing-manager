@@ -533,6 +533,58 @@ def _render_global_customer_search():
         st.info("لا توجد قطع لهذا العميل.")
 
 
+def _render_product_search():
+    """بحث بالنوع/البراند/اللون/الجنس/اسم العميل، في الصين وأمريكا مع بعض."""
+    c1, c2, c3, c4 = st.columns(4)
+    types = db.catalog_list("type")
+    brands = db.catalog_list("brand")
+    colors = db.catalog_list("color")
+    genders = db.catalog_list("gender")
+    ptype = c1.selectbox("النوع", types, index=None, placeholder="الكل", key="psearch_type") if types else None
+    brand = c2.selectbox("البراند", brands, index=None, placeholder="الكل", key="psearch_brand") if brands else None
+    color = c3.selectbox("اللون", colors, index=None, placeholder="الكل", key="psearch_color") if colors else None
+    gender = c4.selectbox("الجنس", genders, index=None, placeholder="الكل", key="psearch_gender") if genders else None
+    custs = db.customers_list()
+    customer = st.selectbox("اسم العميل (اختياري)", custs, index=None, placeholder="الكل",
+                            key="psearch_cust") if custs else None
+
+    if not any([ptype, brand, color, gender, customer]):
+        st.caption("اختر فلتر واحد على الأقل (نوع/براند/لون/جنس/عميل) عشان تشوف النتائج.")
+        return
+
+    cn, usa = db.search_products(ptype, brand, color, gender, customer)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("قطع الصين", len(cn))
+    m2.metric("قطع أمريكا", len(usa))
+    m3.metric("الإجمالي", len(cn) + len(usa))
+
+    rows = []
+    for it in cn:
+        rows.append({
+            "المصدر": "🇨🇳 الصين",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "الحالة": STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _china_profit_disp(it),
+        })
+    for it in usa:
+        rows.append({
+            "المصدر": "🇺🇸 أمريكا",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _usa_profit_disp(it),
+        })
+    if rows:
+        show_df(pd.DataFrame(rows))
+    else:
+        st.info("لا توجد قطع مطابقة.")
+
+
 def _render_customer_manager():
     """تعديل اسم عميل مسجّل (يتغير في كل أوردراته) أو مسح اسم مالوش أوردرات."""
     custs = db.customers_list()
@@ -574,20 +626,38 @@ def _render_customer_manager():
                     st.error("مينفعش تمسحه، عليه أوردرات.")
 
 
+def _panel(label):
+    """لوحة منبثقة (popover) أنضف من expander؛ يرجع لـ expander لو النسخة قديمة."""
+    if hasattr(st, "popover"):
+        return st.popover(label, use_container_width=True)
+    return st.expander(label, expanded=False)
+
+
 # ============================================================
 #  شريط التنقل العلوي (بدل القايمة الجانبية)
 # ============================================================
 _show_logo(140)
-st.markdown("#### 🧵 Infinity Boutique Management")
+st.markdown(
+    "<h4 style='text-align:center;margin-bottom:4px;'>🧵 Infinity Boutique Management</h4>",
+    unsafe_allow_html=True)
 
-with st.expander("🔎 بحث عن عميل (الصين وأمريكا مع بعض)", expanded=False):
-    _render_global_customer_search()
+col_search, col_settings = st.columns(2)
+with col_search:
+    with _panel("🔍 بحث"):
+        t1, t2 = st.tabs(["👤 عميل", "🧦 منتج"])
+        with t1:
+            _render_global_customer_search()
+        with t2:
+            _render_product_search()
+with col_settings:
+    with _panel("⚙️ إعدادات"):
+        t1, t2 = st.tabs(["👤 العملاء", "🧦 المنتج"])
+        with t1:
+            _render_customer_manager()
+        with t2:
+            _render_catalog_manager()
 
-with st.expander("✏️ تعديل / مسح اسم عميل", expanded=False):
-    _render_customer_manager()
-
-with st.expander("⚙️ إدارة المنتج (النوع / البراند / اللون / الجنس)", expanded=False):
-    _render_catalog_manager()
+st.divider()
 
 USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
 _cur_view = st.session_state.get("view", "dashboard")
@@ -1112,12 +1182,14 @@ def _item_form(oid, item, form_key):
         else:
             if is_edit:
                 db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
-                               weight, deposit, status_en, weight_date, new_order_id=new_order_id)
+                               weight, deposit, status_en, weight_date, new_order_id=new_order_id,
+                               ptype=ptype, brand=brand, color=color, gender=gender)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
                 st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
             else:
                 db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
-                               weight, deposit, status_en, weight_date)
+                               weight, deposit, status_en, weight_date,
+                               ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "")
                 st.success("✅ تم إضافة القطعة.")
             st.cache_data.clear()
             rerun()
@@ -1461,12 +1533,14 @@ def _usa_item_form(oid, item, form_key):
         else:
             if is_edit:
                 db.usa_update_item(item["id"], customer.strip(), product.strip(), buy_usd, sell,
-                                   weight, deposit, status_en, weight_date, new_order_id=new_order_id)
+                                   weight, deposit, status_en, weight_date, new_order_id=new_order_id,
+                                   ptype=ptype, brand=brand, color=color, gender=gender)
                 moved = new_order_id is not None and new_order_id != item["order_id"]
                 st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
             else:
                 db.usa_add_item(oid, customer.strip(), product.strip(), buy_usd, sell,
-                                weight, deposit, status_en, weight_date)
+                                weight, deposit, status_en, weight_date,
+                                ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "")
                 st.success("✅ تم إضافة القطعة.")
             st.cache_data.clear()
             rerun()
