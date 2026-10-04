@@ -143,29 +143,39 @@ class Database:
                          o["shipping_yuan_rate"], o["shipping_price_per_kg_yuan"])
 
     def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
-                    status="Order Registered", weight_date=None):
+                    status="Order Registered", weight_date=None,
+                    ptype="", brand="", color="", gender=""):
         c = self._compute(oid, buy_yuan, weight_g, sell)
         return self._exec(
             """INSERT INTO items (order_id, customer_name, product_name, selling_price_egp,
                purchase_price_yuan, weight_grams, deposit_paid, status,
-               purchase_cost_egp, shipping_cost_egp, total_cost_egp, profit_egp, weight_date)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               purchase_cost_egp, shipping_cost_egp, total_cost_egp, profit_egp, weight_date,
+               product_type, product_brand, product_color, product_gender)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date),
+             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date,
+             ptype, brand, color, gender),
             fetch="id")
 
     def update_item(self, iid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
-                    status="Order Registered", weight_date=None, new_order_id=None):
+                    status="Order Registered", weight_date=None, new_order_id=None,
+                    ptype=None, brand=None, color=None, gender=None):
         it = self.get_item(iid)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
         c = self._compute(target_oid, buy_yuan, weight_g, sell)
+        ptype = it["product_type"] if ptype is None else ptype
+        brand = it["product_brand"] if brand is None else brand
+        color = it["product_color"] if color is None else color
+        gender = it["product_gender"] if gender is None else gender
         self._exec(
             """UPDATE items SET order_id=%s, customer_name=%s, product_name=%s, selling_price_egp=%s,
                purchase_price_yuan=%s, weight_grams=%s, deposit_paid=%s, status=%s,
-               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s, weight_date=%s
+               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s, weight_date=%s,
+               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s
                WHERE id=%s""",
             (target_oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date, iid))
+             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date,
+             ptype, brand, color, gender, iid))
 
     def update_item_status(self, iid, status):
         """تحديث حالة القطعة فقط (للوحة المعلومات)."""
@@ -294,6 +304,31 @@ class Database:
 
     def catalog_delete(self, category, value):
         self._exec("DELETE FROM product_options WHERE category=%s AND value=%s", (category, value))
+
+    def search_products(self, ptype=None, brand=None, color=None, gender=None, customer=None):
+        """بحث موحّد بالنوع/البراند/اللون/الجنس/اسم العميل في الصين وأمريكا مع بعض."""
+        def _build(table, order_table, extra_cols):
+            conds, params = [], []
+            if ptype:
+                conds.append("i.product_type=%s"); params.append(ptype)
+            if brand:
+                conds.append("i.product_brand=%s"); params.append(brand)
+            if color:
+                conds.append("i.product_color=%s"); params.append(color)
+            if gender:
+                conds.append("i.product_gender=%s"); params.append(gender)
+            if customer:
+                conds.append("LOWER(TRIM(i.customer_name))=LOWER(TRIM(%s))"); params.append(customer)
+            where = (" AND " + " AND ".join(conds)) if conds else ""
+            sql = f"""SELECT i.*, o.order_number {extra_cols} FROM {table} i
+                JOIN {order_table} o ON o.id=i.order_id
+                WHERE 1=1 {where}
+                ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC"""
+            return self._exec(sql, tuple(params), fetch="all")
+
+        cn = _build("items", "orders", "")
+        usa = _build("usa_items", "usa_orders", ", o.supplier_name")
+        return cn, usa
 
     def customers_list(self):
         """أسماء العملاء بدون تكرار من الصين وأمريكا وبيانات العملاء المسجّلة
@@ -507,6 +542,15 @@ class Database:
             WHERE purchase_price_usd = 0 AND weight_grams = 0
               AND profit_egp IS NOT NULL AND (total_cost_egp IS NULL OR total_cost_egp = 0)
               AND cost_egp <> 0""")
+        # أعمدة تفاصيل المنتج (نوع/براند/لون/جنس) — للبحث والفلترة، بالإضافة لاسم المنتج النصي
+        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_type TEXT DEFAULT ''")
+        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_brand TEXT DEFAULT ''")
+        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_color TEXT DEFAULT ''")
+        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_gender TEXT DEFAULT ''")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_type TEXT DEFAULT ''")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_brand TEXT DEFAULT ''")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_color TEXT DEFAULT ''")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_gender TEXT DEFAULT ''")
         # جدول المصاريف العامة (تخص الصين وأمريكا معاً)
         self._exec("""CREATE TABLE IF NOT EXISTS expenses (
             id SERIAL PRIMARY KEY,
@@ -691,30 +735,38 @@ class Database:
                          o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
 
     def usa_add_item(self, order_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
-                     status="Order Registered", weight_date=None):
+                     status="Order Registered", weight_date=None,
+                     ptype="", brand="", color="", gender=""):
         c = self._usa_compute(order_id, buy_usd, weight_g, sell)
         return self._exec(
             """INSERT INTO usa_items (order_id, customer_name, product_name, purchase_price_usd,
                weight_grams, selling_price_egp, deposit_paid, status, weight_date,
-               purchase_cost_egp, shipping_cost_egp, total_cost_egp, cost_egp, profit_egp)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               purchase_cost_egp, shipping_cost_egp, total_cost_egp, cost_egp, profit_egp,
+               product_type, product_brand, product_color, product_gender)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (order_id, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"]), fetch="id")
+             c["profit_egp"], ptype, brand, color, gender), fetch="id")
 
     def usa_update_item(self, item_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
-                        status="Order Registered", weight_date=None, new_order_id=None):
+                        status="Order Registered", weight_date=None, new_order_id=None,
+                        ptype=None, brand=None, color=None, gender=None):
         it = self.usa_get_item(item_id)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
         c = self._usa_compute(target_oid, buy_usd, weight_g, sell)
+        ptype = it["product_type"] if ptype is None else ptype
+        brand = it["product_brand"] if brand is None else brand
+        color = it["product_color"] if color is None else color
+        gender = it["product_gender"] if gender is None else gender
         self._exec(
             """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, purchase_price_usd=%s,
                weight_grams=%s, selling_price_egp=%s, deposit_paid=%s, status=%s, weight_date=%s,
-               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, cost_egp=%s, profit_egp=%s
+               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, cost_egp=%s, profit_egp=%s,
+               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s
                WHERE id=%s""",
             (target_oid, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], item_id))
+             c["profit_egp"], ptype, brand, color, gender, item_id))
 
     def usa_delete_item(self, item_id):
         self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
