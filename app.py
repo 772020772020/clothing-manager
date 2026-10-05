@@ -405,30 +405,37 @@ def _compose_product_name(ptype, brand, color, gender):
     return name.strip()
 
 
-def _product_picker(k):
-    """4 خانات اختيار: النوع / البراند / اللون / الجنس. ترجع (type, brand, color, gender)."""
+def _product_picker(k, current=None):
+    """4 خانات اختيار: النوع / البراند / اللون / الجنس. ترجع (type, brand, color, gender).
+    current (اختياري): (ptype, brand, color, gender) القيم المحفوظة حالياً، تتحدد تلقائياً
+    في الخانة لو لسه موجودة في القايمة، عشان التعديل يبين اختيارك السابق بدل ما يفضل فاضي."""
+    cur_type, cur_brand, cur_color, cur_gender = current or (None, None, None, None)
     types = db.catalog_list("type")
     brands = db.catalog_list("brand")
     colors = db.catalog_list("color")
     genders = db.catalog_list("gender")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        ptype = st.selectbox("النوع", types, index=None, placeholder="اختر...",
+        idx = types.index(cur_type) if cur_type in types else None
+        ptype = st.selectbox("النوع", types, index=idx, placeholder="اختر...",
                              key=f"{k}_ptype") if types else None
         if not types:
             st.caption("لا يوجد أنواع — ضِفها من ⚙️")
     with c2:
-        brand = st.selectbox("البراند", brands, index=None, placeholder="اختر...",
+        idx = brands.index(cur_brand) if cur_brand in brands else None
+        brand = st.selectbox("البراند", brands, index=idx, placeholder="اختر...",
                              key=f"{k}_pbrand") if brands else None
         if not brands:
             st.caption("لا يوجد براندات — ضِفها من ⚙️")
     with c3:
-        color = st.selectbox("اللون", colors, index=None, placeholder="اختر...",
+        idx = colors.index(cur_color) if cur_color in colors else None
+        color = st.selectbox("اللون", colors, index=idx, placeholder="اختر...",
                              key=f"{k}_pcolor") if colors else None
         if not colors:
             st.caption("لا يوجد ألوان — ضِفها من ⚙️")
     with c4:
-        gender = st.selectbox("الجنس", genders, index=None, placeholder="اختر...",
+        idx = genders.index(cur_gender) if cur_gender in genders else None
+        gender = st.selectbox("الجنس", genders, index=idx, placeholder="اختر...",
                               key=f"{k}_pgender") if genders else None
         if not genders:
             st.caption("لا يوجد جنس — ضِفه من ⚙️")
@@ -1122,9 +1129,10 @@ def _item_form(oid, item, form_key):
                                         item["customer_name"] if is_edit else "",
                                         db.customers_list(), key=f"{k}_cust", in_form=True)
         st.markdown("**تفاصيل المنتج**")
-        ptype, brand, color, gender = _product_picker(k)
-        if is_edit:
-            st.caption(f"الاسم الحالي: {item['product_name']} — سيب الخانات فاضية لو مش عايز تغيّره")
+        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
+        ptype, brand, color, gender = _product_picker(k, current=cur)
+        if is_edit and not any(cur):
+            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
         c3, c4, c5 = st.columns(3)
         with c3:
             sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
@@ -1470,9 +1478,10 @@ def _usa_item_form(oid, item, form_key):
                                         item["customer_name"] if is_edit else "",
                                         db.usa_customers_list(), key=f"{k}_cust", in_form=True)
         st.markdown("**تفاصيل المنتج**")
-        ptype, brand, color, gender = _product_picker(k)
-        if is_edit:
-            st.caption(f"الاسم الحالي: {item['product_name']} — سيب الخانات فاضية لو مش عايز تغيّره")
+        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
+        ptype, brand, color, gender = _product_picker(k, current=cur)
+        if is_edit and not any(cur):
+            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
         c3, c4, c5 = st.columns(3)
         with c3:
             sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
