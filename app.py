@@ -135,6 +135,10 @@ def _ensure_usa_tables():
         db.catalog_init()
     except Exception as e:
         st.warning(f"تنبيه: لم يتم إنشاء جدول كتالوج المنتج تلقائياً ({e}).")
+    try:
+        db.shipment_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جدول الشحنات تلقائياً ({e}).")
     return True
 
 _ensure_usa_tables()
@@ -573,6 +577,7 @@ def _render_product_search():
             "العميل": it["customer_name"],
             "المنتج": it["product_name"],
             "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
             "الحالة": STATUS_AR.get(it["status"], it["status"]),
             "الربح": _china_profit_disp(it),
         })
@@ -583,6 +588,7 @@ def _render_product_search():
             "العميل": it["customer_name"],
             "المنتج": it["product_name"],
             "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
             "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
             "الربح": _usa_profit_disp(it),
         })
@@ -901,6 +907,7 @@ def view_dashboard():
                 "الوزن (جم)": f'{it["weight_grams"]:g}',
                 "التكلفة (ج.م)": egp(it["total_cost_egp"]),
                 "سعر البيع": egp(it["selling_price_egp"]),
+                "العربون": egp(it["deposit_paid"]),
                 "الربح": profit,
             })
         show_df(pd.DataFrame(tbl), style=True)
@@ -1172,12 +1179,17 @@ def _item_form(oid, item, form_key):
             wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
             weight_date = wd.isoformat()
 
-        # معاينة الحساب
-        c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"],
-                      order["shipping_yuan_rate"], order["shipping_price_per_kg_yuan"])
+        # معاينة الحساب — سعر الشحن بييجي من شحنة يوم الوزن لو مسجّلة، وإلا من سعر الأوردر مؤقتاً
+        sh = db.get_shipment(weight_date) if weight_date else None
+        ship_rate = sh["shipping_yuan_rate"] if sh else order["shipping_yuan_rate"]
+        ship_kg = sh["shipping_price_per_kg_yuan"] if sh else order["shipping_price_per_kg_yuan"]
+        c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"], ship_rate, ship_kg)
         prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
         st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
                    f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+        if weight_date and not sh:
+            st.caption("⚠️ لسه مفيش سعر شحنة مسجّل لليوم ده — المعاينة بسعر شحن الأوردر مؤقتاً. "
+                      "سجّل سعر الشحنة من تقارير الصين ⟵ تاب \"الواصل في يوم\".")
 
         label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
         submitted = st.form_submit_button(label, type="primary")
@@ -1255,6 +1267,24 @@ def view_reports():
         if chosen_day is None:
             chosen_day = manual_day
         day_str = chosen_day.isoformat()
+
+        # سعر يوان الشحن لهذا اليوم — مشترك بين كل القطع الواصلة في نفس اليوم مهما كان أوردرها
+        st.markdown("##### 🚢 سعر يوان الشحن ليوم الوصول ده")
+        st.caption("سعر واحد بيتطبق على كل القطع اللي وصلت في اليوم ده من أي أوردر، بدل ما يتحسب بسعر شحن الأوردر.")
+        sh = db.get_shipment(day_str)
+        c1, c2 = st.columns(2)
+        with c1:
+            sh_rate = _num("سعر اليوان وقت الشحن", sh["shipping_yuan_rate"] if sh else 0, key=f"sh_rate_{day_str}")
+        with c2:
+            sh_kg = _num("سعر كيلو الشحن باليوان", sh["shipping_price_per_kg_yuan"] if sh else 0, key=f"sh_kg_{day_str}")
+        if st.button("💾 حفظ سعر الشحنة وإعادة حساب كل قطعها", type="primary", key=f"sh_save_{day_str}"):
+            db.save_shipment(day_str, sh_rate, sh_kg)
+            st.cache_data.clear()
+            _flash("✅ تم حفظ سعر الشحنة وإعادة حساب كل القطع اللي وصلت في هذا اليوم.")
+            rerun()
+        if not sh:
+            st.warning("لسه مفيش سعر شحنة متسجّل لليوم ده — القطع هتتحسب بسعر شحن الأوردر القديم لحد ما تحفظ السعر هنا.")
+
         arr = db.items_by_weight_date(day_str)
         if arr:
             adata = []
@@ -1273,6 +1303,7 @@ def view_reports():
                     "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
                     "الوزن (جم)": f'{it["weight_grams"]:g}',
                     "سعر البيع": egp(it["selling_price_egp"]),
+                    "العربون": egp(it["deposit_paid"]),
                     "إجمالي التكلفة": egp(it["total_cost_egp"]),
                     "الحالة": STATUS_AR.get(it["status"], it["status"]),
                     # الفوري وخرج للقياس بصفر عشان صف الإجمالي يجمع صح
@@ -1603,6 +1634,7 @@ def view_usa_dashboard():
                 "الوزن (جم)": f'{it["weight_grams"]:g}',
                 "التكلفة": egp(it["total_cost_egp"]),
                 "سعر البيع": egp(it["selling_price_egp"]),
+                "العربون": egp(it["deposit_paid"]),
                 "الربح": _usa_profit_disp(it),
             })
         show_df(pd.DataFrame(tbl), style=True)
@@ -1908,6 +1940,7 @@ def view_usa_reports():
                     "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
                     "الوزن (جم)": f'{it["weight_grams"]:g}',
                     "سعر البيع": egp(it["selling_price_egp"]),
+                    "العربون": egp(it["deposit_paid"]),
                     "إجمالي التكلفة": egp(it["total_cost_egp"]),
                     "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
                     "الربح": egp(0) if it["status"] in _OUT else egp(it["profit_egp"]),
