@@ -136,16 +136,71 @@ class Database:
             FROM items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
         """, (oid,), fetch="one")
 
+    # ---------- شحنات (سعر يوان الشحن مربوط باليوم اللي الشحنة وصلت فيه، مش بالأوردر) ----------
+    def shipment_init(self):
+        self._exec("""CREATE TABLE IF NOT EXISTS shipments (
+            id SERIAL PRIMARY KEY,
+            ship_date TEXT UNIQUE NOT NULL,
+            shipping_yuan_rate DOUBLE PRECISION DEFAULT 0,
+            shipping_price_per_kg_yuan DOUBLE PRECISION DEFAULT 0,
+            notes TEXT DEFAULT ''
+        )""")
+
+    def get_shipment(self, ship_date):
+        if not ship_date:
+            return None
+        return self._exec("SELECT * FROM shipments WHERE ship_date=%s", (ship_date,), fetch="one")
+
+    def save_shipment(self, ship_date, rate, kg_rate, notes=""):
+        self._exec("""
+            INSERT INTO shipments (ship_date, shipping_yuan_rate, shipping_price_per_kg_yuan, notes)
+            VALUES (%s,%s,%s,%s)
+            ON CONFLICT (ship_date) DO UPDATE SET
+                shipping_yuan_rate=EXCLUDED.shipping_yuan_rate,
+                shipping_price_per_kg_yuan=EXCLUDED.shipping_price_per_kg_yuan,
+                notes=EXCLUDED.notes
+        """, (ship_date, rate, kg_rate, notes))
+        self.recalc_shipment(ship_date)
+
+    def all_shipments(self):
+        return self._exec("SELECT * FROM shipments ORDER BY ship_date DESC", fetch="all")
+
+    def recalc_shipment(self, ship_date):
+        """يعيد حساب كل القطع اللي وصلت في اليوم ده مهما كان أوردرها (دمج شحنات)."""
+        items = self._exec("SELECT * FROM items WHERE weight_date=%s", (ship_date,), fetch="all")
+        for it in items:
+            o = self.get_order(it["order_id"])
+            if not o:
+                continue
+            c = self._compute_raw(it["purchase_price_yuan"], it["weight_grams"], it["selling_price_egp"],
+                                  o["purchase_yuan_rate"], ship_date)
+            self._exec(
+                """UPDATE items SET purchase_cost_egp=%s, shipping_cost_egp=%s,
+                   total_cost_egp=%s, profit_egp=%s WHERE id=%s""",
+                (c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], it["id"]))
+
     # ---------- قطع ----------
-    def _compute(self, oid, buy_yuan, weight_g, sell):
+    def _compute_raw(self, buy_yuan, weight_g, sell, purchase_yuan_rate, weight_date):
+        """الحساب الفعلي: سعر يوان الشراء بييجي من الأوردر، سعر يوان الشحن وسعر كيلو الشحن
+        بييجوا من شحنة اليوم (weight_date) لو مسجّلة، وإلا يفضلوا صفر لحد ما تتسجل."""
+        sh = self.get_shipment(weight_date)
+        ship_rate = sh["shipping_yuan_rate"] if sh else 0
+        ship_kg = sh["shipping_price_per_kg_yuan"] if sh else 0
+        return calc_item(buy_yuan, weight_g, sell, purchase_yuan_rate, ship_rate, ship_kg)
+
+    def _compute(self, oid, buy_yuan, weight_g, sell, weight_date=None):
         o = self.get_order(oid)
+        if weight_date and self.get_shipment(weight_date):
+            return self._compute_raw(buy_yuan, weight_g, sell, o["purchase_yuan_rate"], weight_date)
+        # ما فيش شحنة مسجّلة لليوم ده — نرجع لسلوك قديم (سعر شحن الأوردر نفسه) عشان القطع
+        # القديمة تفضل محسوبة زي ما هي بالظبط، والقطع الجديدة قبل ما تسجّل شحنة اليوم.
         return calc_item(buy_yuan, weight_g, sell, o["purchase_yuan_rate"],
                          o["shipping_yuan_rate"], o["shipping_price_per_kg_yuan"])
 
     def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
                     status="Order Registered", weight_date=None,
                     ptype="", brand="", color="", gender=""):
-        c = self._compute(oid, buy_yuan, weight_g, sell)
+        c = self._compute(oid, buy_yuan, weight_g, sell, weight_date)
         return self._exec(
             """INSERT INTO items (order_id, customer_name, product_name, selling_price_egp,
                purchase_price_yuan, weight_grams, deposit_paid, status,
@@ -162,7 +217,7 @@ class Database:
                     ptype=None, brand=None, color=None, gender=None):
         it = self.get_item(iid)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
-        c = self._compute(target_oid, buy_yuan, weight_g, sell)
+        c = self._compute(target_oid, buy_yuan, weight_g, sell, weight_date)
         ptype = it["product_type"] if ptype is None else ptype
         brand = it["product_brand"] if brand is None else brand
         color = it["product_color"] if color is None else color
@@ -399,8 +454,8 @@ class Database:
         if not o:
             return
         for it in self.items_of(oid):
-            c = calc_item(it["purchase_price_yuan"], it["weight_grams"], it["selling_price_egp"],
-                          o["purchase_yuan_rate"], o["shipping_yuan_rate"], o["shipping_price_per_kg_yuan"])
+            c = self._compute(oid, it["purchase_price_yuan"], it["weight_grams"],
+                              it["selling_price_egp"], it["weight_date"])
             self._exec(
                 """UPDATE items SET purchase_cost_egp=%s, shipping_cost_egp=%s,
                    total_cost_egp=%s, profit_egp=%s WHERE id=%s""",
