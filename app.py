@@ -1,1028 +1,2348 @@
 # -*- coding: utf-8 -*-
 """
-db.py
-طبقة قاعدة البيانات (PostgreSQL / Supabase) لنسخة السحابة.
-نفس منطق نسخة SQLite لكن بصيغة PostgreSQL.
+app.py
+نسخة الويب من برنامج إدارة تجارة الملابس المستوردة (Streamlit).
+التشغيل:  streamlit run app.py
 """
 
-from datetime import date as _date
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from calculations import calc_item
+import io
+from datetime import date, datetime
+import pandas as pd
+import streamlit as st
 
-ITEM_STATUSES = [
-    "Order Registered", "In Transit",
-    "Awaiting Weight", "In Warehouse", "Out For Delivery",
-    "Delivered", "Delivered Unpaid", "Ready For Sale", "Out For Fitting", "Out of Stock",
-]
-STATUS_AR = {
-    "Order Registered": "تم التسجيل",
-    "In Transit": "في الطريق",
-    "Awaiting Weight": "بانتظار الوزن",
-    "In Warehouse": "في المستودع",
-    "Out For Delivery": "مع شركة الشحن",
-    "Delivered": "تم التسليم",
-    "Delivered Unpaid": "تسليم - آجل",
-    "Ready For Sale": "فوري (للبيع)",
-    "Out For Fitting": "خرج للقياس",
-    "Out of Stock": "نفذ من المصدر",
-}
+from db import Database, ITEM_STATUSES, STATUS_AR, USA_STATUSES, USA_STATUS_AR
+from calculations import calc_item, payment_status, remaining_balance
+import storage
 
-# ===== نظام أمريكا (نفس منطق الصين بالظبط: سعر دولار + وزن + شحن) =====
-USA_STATUSES = list(ITEM_STATUSES)
-USA_STATUS_AR = dict(STATUS_AR)
+# ============================================================
+#  إعداد الصفحة + RTL
+# ============================================================
+import os as _os_icon
+_page_icon = "🧵"
+for _ic in ("favicon.png", "Favicon.png", "logo.png"):
+    if _os_icon.path.exists(_ic):
+        _page_icon = _ic
+        break
+st.set_page_config(page_title="Infinity Boutique Management", page_icon=_page_icon,
+                   layout="wide", initial_sidebar_state="collapsed")
+
+# أيقونة الآيفون على الشاشة الرئيسية (apple-touch-icon)
+# نستخدم رابط مباشر من GitHub (أكثر توافقاً مع iOS من data-uri)
+_ICON_URL = "https://raw.githubusercontent.com/772020772020/clothing-manager/main/logo.png"
+st.markdown(
+    f'<link rel="apple-touch-icon" href="{_ICON_URL}">'
+    f'<link rel="apple-touch-icon" sizes="180x180" href="{_ICON_URL}">'
+    f'<link rel="apple-touch-icon" sizes="152x152" href="{_ICON_URL}">'
+    f'<link rel="apple-touch-icon" sizes="120x120" href="{_ICON_URL}">'
+    f'<link rel="icon" type="image/png" href="{_ICON_URL}">',
+    unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+    .stApp { direction: rtl; }
+    h1, h2, h3, h4, h5, h6, p, label, div, span { text-align: right; }
+    .stDataFrame { direction: ltr; }
+    [data-testid="stMetricValue"] { direction: ltr; text-align: center; }
+    [data-testid="stMetricLabel"] { justify-content: center; }
+    .stButton button { width: 100%; }
+    /* إخفاء القايمة الجانبية وزر فتحها نهائياً (التنقل بقى فوق) */
+    section[data-testid="stSidebar"] { display: none !important; }
+    [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+    /* تحسين العرض على الموبايل */
+    @media (max-width: 640px) {
+        [data-testid="stMetricValue"] { font-size: 1.4rem; }
+        h1 { font-size: 1.5rem; }
+        h2 { font-size: 1.3rem; }
+        h3 { font-size: 1.1rem; }
+        .block-container { padding-top: 2rem; padding-left: 0.8rem; padding-right: 0.8rem; }
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-def connect(cfg):
-    """إنشاء اتصال بقاعدة بيانات Supabase."""
-    return psycopg2.connect(
-        host=cfg["host"],
-        port=int(cfg["port"]),
-        dbname=cfg["dbname"],
-        user=cfg["user"],
-        password=cfg["password"],
-        cursor_factory=RealDictCursor,
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=5,
-        connect_timeout=10,
-    )
+# ============================================================
+#  حماية بكلمة مرور
+# ============================================================
+import os as _os
 
-
-class Database:
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.conn = connect(cfg)
-        self.conn.autocommit = True
-
-    def _cur(self):
-        """يرجع cursor، ويعيد الاتصال لو اتقطع."""
-        try:
-            if self.conn.closed:
-                self.conn = connect(self.cfg)
-                self.conn.autocommit = True
-            return self.conn.cursor()
-        except psycopg2.Error:
-            self.conn = connect(self.cfg)
-            self.conn.autocommit = True
-            return self.conn.cursor()
-
-    def _exec(self, sql, params=(), fetch=None):
-        """تنفيذ استعلام مع إعادة المحاولة مرة عند انقطاع الاتصال."""
-        for attempt in range(2):
-            try:
-                cur = self._cur()
-                cur.execute(sql, params)
-                if fetch == "one":
-                    return cur.fetchone()
-                if fetch == "all":
-                    return cur.fetchall()
-                if fetch == "id":
-                    return cur.fetchone()["id"]
-                return None
-            except psycopg2.OperationalError:
-                if attempt == 0:
-                    try:
-                        self.conn = connect(self.cfg)
-                        self.conn.autocommit = True
-                    except psycopg2.Error:
-                        pass
-                    continue
-                raise
-
-    # ---------- أوردرات ----------
-    def create_order(self, number, date, buy_rate=0, ship_rate=0, ship_kg=0, notes=""):
-        return self._exec(
-            """INSERT INTO orders (order_number, order_date, purchase_yuan_rate,
-               shipping_yuan_rate, shipping_price_per_kg_yuan, notes)
-               VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (number, date, buy_rate, ship_rate, ship_kg, notes), fetch="id")
-
-    def update_order(self, oid, number, date, buy_rate, ship_rate, ship_kg, notes=""):
-        self._exec(
-            """UPDATE orders SET order_number=%s, order_date=%s, purchase_yuan_rate=%s,
-               shipping_yuan_rate=%s, shipping_price_per_kg_yuan=%s, notes=%s WHERE id=%s""",
-            (number, date, buy_rate, ship_rate, ship_kg, notes, oid))
-        self.recalc_order(oid)
-
-    def delete_order(self, oid):
-        self._exec("DELETE FROM orders WHERE id=%s", (oid,))
-
-    def get_order(self, oid):
-        return self._exec("SELECT * FROM orders WHERE id=%s", (oid,), fetch="one")
-
-    def all_orders(self):
-        # ترتيب بالرقم تنازلياً (الأكبر فوق)؛ لو الرقم مش رقمي يترتب نصياً في الآخر
-        return self._exec("""
-            SELECT * FROM orders
-            ORDER BY
-                CASE WHEN order_number ~ '^[0-9]+$' THEN 0 ELSE 1 END,
-                CASE WHEN order_number ~ '^[0-9]+$' THEN CAST(order_number AS BIGINT) ELSE NULL END DESC,
-                order_number DESC
-        """, fetch="all")
-
-    def order_summary(self, oid):
-        return self._exec("""
-            SELECT COUNT(*) pieces,
-                COALESCE(SUM(CASE WHEN weight_grams>0 THEN 1 ELSE 0 END),0) with_weight,
-                COALESCE(SUM(CASE WHEN weight_grams<=0 THEN 1 ELSE 0 END),0) awaiting_weight,
-                COALESCE(SUM(CASE WHEN status='Delivered' THEN 1 ELSE 0 END),0) delivered,
-                COALESCE(SUM(weight_grams),0) total_weight,
-                COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(deposit_paid),0) deposits,
-                COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
-                COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
-                COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit
-            FROM items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-        """, (oid,), fetch="one")
-
-    # ---------- شحنات (سعر يوان الشحن مربوط باليوم اللي الشحنة وصلت فيه، مش بالأوردر) ----------
-    def shipment_init(self):
-        self._exec("""CREATE TABLE IF NOT EXISTS shipments (
-            id SERIAL PRIMARY KEY,
-            ship_date TEXT UNIQUE NOT NULL,
-            shipping_yuan_rate DOUBLE PRECISION DEFAULT 0,
-            shipping_price_per_kg_yuan DOUBLE PRECISION DEFAULT 0,
-            notes TEXT DEFAULT ''
-        )""")
-
-    def get_shipment(self, ship_date):
-        if not ship_date:
-            return None
-        return self._exec("SELECT * FROM shipments WHERE ship_date=%s", (ship_date,), fetch="one")
-
-    def save_shipment(self, ship_date, rate, kg_rate, notes=""):
-        self._exec("""
-            INSERT INTO shipments (ship_date, shipping_yuan_rate, shipping_price_per_kg_yuan, notes)
-            VALUES (%s,%s,%s,%s)
-            ON CONFLICT (ship_date) DO UPDATE SET
-                shipping_yuan_rate=EXCLUDED.shipping_yuan_rate,
-                shipping_price_per_kg_yuan=EXCLUDED.shipping_price_per_kg_yuan,
-                notes=EXCLUDED.notes
-        """, (ship_date, rate, kg_rate, notes))
-        self.recalc_shipment(ship_date)
-
-    def all_shipments(self):
-        return self._exec("SELECT * FROM shipments ORDER BY ship_date DESC", fetch="all")
-
-    def recalc_shipment(self, ship_date):
-        """يعيد حساب كل القطع اللي وصلت في اليوم ده مهما كان أوردرها (دمج شحنات)."""
-        items = self._exec("SELECT * FROM items WHERE weight_date=%s", (ship_date,), fetch="all")
-        for it in items:
-            o = self.get_order(it["order_id"])
-            if not o:
-                continue
-            c = self._compute_raw(it["purchase_price_yuan"], it["weight_grams"], it["selling_price_egp"],
-                                  o["purchase_yuan_rate"], ship_date)
-            self._exec(
-                """UPDATE items SET purchase_cost_egp=%s, shipping_cost_egp=%s,
-                   total_cost_egp=%s, profit_egp=%s WHERE id=%s""",
-                (c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], it["id"]))
-
-    # ---------- قطع ----------
-    def _compute_raw(self, buy_yuan, weight_g, sell, purchase_yuan_rate, weight_date):
-        """الحساب الفعلي: سعر يوان الشراء بييجي من الأوردر، سعر يوان الشحن وسعر كيلو الشحن
-        بييجوا من شحنة اليوم (weight_date) لو مسجّلة، وإلا يفضلوا صفر لحد ما تتسجل."""
-        sh = self.get_shipment(weight_date)
-        ship_rate = sh["shipping_yuan_rate"] if sh else 0
-        ship_kg = sh["shipping_price_per_kg_yuan"] if sh else 0
-        return calc_item(buy_yuan, weight_g, sell, purchase_yuan_rate, ship_rate, ship_kg)
-
-    def _compute(self, oid, buy_yuan, weight_g, sell, weight_date=None):
-        o = self.get_order(oid)
-        if weight_date and self.get_shipment(weight_date):
-            return self._compute_raw(buy_yuan, weight_g, sell, o["purchase_yuan_rate"], weight_date)
-        # ما فيش شحنة مسجّلة لليوم ده — نرجع لسلوك قديم (سعر شحن الأوردر نفسه) عشان القطع
-        # القديمة تفضل محسوبة زي ما هي بالظبط، والقطع الجديدة قبل ما تسجّل شحنة اليوم.
-        return calc_item(buy_yuan, weight_g, sell, o["purchase_yuan_rate"],
-                         o["shipping_yuan_rate"], o["shipping_price_per_kg_yuan"])
-
-    def _delivered_date_for(self, status, given=None, existing=None):
-        """تاريخ التسليم: يتسجل بس لو الحالة 'تم التسليم'، وإلا فاضي."""
-        if status != "Delivered":
-            return None
-        return given or existing or _date.today().isoformat()
-
-    def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
-                    status="Order Registered", weight_date=None,
-                    ptype="", brand="", color="", gender="", delivered_date=None):
-        c = self._compute(oid, buy_yuan, weight_g, sell, weight_date)
-        dd = self._delivered_date_for(status, delivered_date)
-        return self._exec(
-            """INSERT INTO items (order_id, customer_name, product_name, selling_price_egp,
-               purchase_price_yuan, weight_grams, deposit_paid, status,
-               purchase_cost_egp, shipping_cost_egp, total_cost_egp, profit_egp, weight_date,
-               product_type, product_brand, product_color, product_gender, delivered_date)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date,
-             ptype, brand, color, gender, dd),
-            fetch="id")
-
-    def update_item(self, iid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
-                    status="Order Registered", weight_date=None, new_order_id=None,
-                    ptype=None, brand=None, color=None, gender=None, delivered_date=None):
-        it = self.get_item(iid)
-        target_oid = new_order_id if new_order_id is not None else it["order_id"]
-        c = self._compute(target_oid, buy_yuan, weight_g, sell, weight_date)
-        dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
-        ptype = it["product_type"] if ptype is None else ptype
-        brand = it["product_brand"] if brand is None else brand
-        color = it["product_color"] if color is None else color
-        gender = it["product_gender"] if gender is None else gender
-        self._exec(
-            """UPDATE items SET order_id=%s, customer_name=%s, product_name=%s, selling_price_egp=%s,
-               purchase_price_yuan=%s, weight_grams=%s, deposit_paid=%s, status=%s,
-               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s, weight_date=%s,
-               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s, delivered_date=%s
-               WHERE id=%s""",
-            (target_oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date,
-             ptype, brand, color, gender, dd, iid))
-
-    def update_item_status(self, iid, status):
-        """تحديث حالة القطعة فقط (للوحة المعلومات)."""
-        self._exec("""UPDATE items SET status=%s,
-            delivered_date = CASE WHEN %s='Delivered' THEN COALESCE(delivered_date, %s) ELSE NULL END
-            WHERE id=%s""", (status, status, _date.today().isoformat(), iid))
-
-    def report_expected_vs_actual(self):
-        """مقارنة الربح المتوقع (تقدير 500ج) بالربح الحقيقي للقطع التي وصل وزنها."""
-        return self._exec("""
-            SELECT o.order_number, i.customer_name, i.product_name,
-                i.selling_price_egp, i.purchase_price_yuan, i.weight_grams, i.profit_egp AS actual,
-                (i.selling_price_egp - (
-                    i.purchase_price_yuan * o.purchase_yuan_rate
-                    + 0.5 * o.shipping_price_per_kg_yuan * o.shipping_yuan_rate
-                )) AS expected
-            FROM items i JOIN orders o ON o.id=i.order_id
-            WHERE i.weight_grams > 0
-              AND i.selling_price_egp > 0
-              AND i.purchase_price_yuan > 0
-              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC
-        """, fetch="all")
-
-    def report_outstanding_by_customer(self):
-        """العملاء الذين عليهم مبالغ مستحقة (تسليم آجل أو لم يُسلَّم بعد)، مرتّبين تنازلياً."""
-        return self._exec("""
-            SELECT customer_name,
-                COUNT(*) pieces,
-                COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(deposit_paid),0) deposits,
-                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
-            FROM items
-            WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Delivered','Order Registered')
-            GROUP BY customer_name
-            HAVING COALESCE(SUM(selling_price_egp-deposit_paid),0) > 0
-            ORDER BY outstanding DESC
-        """, fetch="all")
-
-    def items_by_status(self, status):
-        """كل القطع في حالة معيّنة مع رقم الأوردر."""
-        return self._exec("""SELECT i.*, o.order_number FROM items i
-            JOIN orders o ON o.id=i.order_id
-            WHERE i.status=%s
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", (status,), fetch="all")
-
-    def status_counts(self):
-        """عدد القطع في كل حالة."""
-        rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
-        return {r["status"]: r["c"] for r in rows}
-
-    def all_items_with_order(self):
-        """كل القطع مع رقم الأوردر (للوحة المعلومات والتعديل السريع)."""
-        return self._exec("""SELECT i.*, o.order_number FROM items i
-            JOIN orders o ON o.id=i.order_id
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
-
-    def items_by_weight_date(self, day):
-        """القطع اللي اتسجّل وزنها في يوم معين (يشمل الفوري وخرج للقياس، بدون المرتجع)."""
-        return self._exec("""SELECT i.*, o.order_number FROM items i
-            JOIN orders o ON o.id=i.order_id
-            WHERE i.weight_date=%s AND i.weight_grams>0
-              AND i.status NOT IN ('Out of Stock','Cancelled')
-            ORDER BY o.order_number, i.id""", (day,), fetch="all")
-
-    def items_of_customer(self, customer):
-        """كل قطع عميل معين (يتجاهل الكابيتال/سمول والمسافات)."""
-        return self._exec("""SELECT i.*, o.order_number FROM items i
-            JOIN orders o ON o.id=i.order_id
-            WHERE LOWER(TRIM(i.customer_name))=LOWER(TRIM(%s))
-            ORDER BY o.order_date::date DESC, i.id ASC""", (customer,), fetch="all")
-
-    def weight_dates(self):
-        """كل التواريخ اللي فيها قطع اتسجّل وزنها (للاختيار)."""
-        rows = self._exec("""SELECT DISTINCT weight_date FROM items
-            WHERE weight_date IS NOT NULL AND weight_grams>0
-            ORDER BY weight_date DESC""", fetch="all")
-        return [r["weight_date"] for r in rows]
-
-    # ---------- بيانات العملاء (عنوان + تليفون) — موحّدة بين الصين وأمريكا ----------
-    def customers_init(self):
-        self._exec("""CREATE TABLE IF NOT EXISTS customers (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            name_key TEXT UNIQUE NOT NULL,
-            phone TEXT DEFAULT '',
-            address TEXT DEFAULT ''
-        )""")
-
-    def get_customer_info(self, name):
-        return self._exec("SELECT * FROM customers WHERE name_key=LOWER(TRIM(%s))",
-                          (name,), fetch="one")
-
-    def save_customer_info(self, name, phone, address):
-        name = (name or "").strip()
-        if not name:
+def _show_logo(width=180):
+    """يعرض اللوجو لو الملف موجود (logo.png بجوار app.py)، وإلا يعرض اسم المحل كلوجو نصي."""
+    try:
+        if _os.path.exists("logo.png"):
+            c1, c2, c3 = st.columns([1, 2, 1])
+            with c2:
+                st.image("logo.png", width=width)
             return
-        self._exec("""
-            INSERT INTO customers (name, name_key, phone, address)
-            VALUES (%s, LOWER(TRIM(%s)), %s, %s)
-            ON CONFLICT (name_key) DO UPDATE SET
-                name=EXCLUDED.name, phone=EXCLUDED.phone, address=EXCLUDED.address
-        """, (name, name, phone or "", address or ""))
+    except Exception:
+        pass
+    st.markdown(
+        "<h1 style='text-align:center;font-family:Georgia,serif;letter-spacing:3px;"
+        "margin-bottom:0;'>✨ INFINITY BOUTIQUE ✨</h1>"
+        "<p style='text-align:center;color:gray;margin-top:0;'>Clothing Import Management</p>",
+        unsafe_allow_html=True)
 
-    # ---------- كتالوج المنتج (نوع / براند / لون / جنس) — موحّد بين الصين وأمريكا ----------
-    def catalog_init(self):
-        self._exec("""CREATE TABLE IF NOT EXISTS product_options (
-            id SERIAL PRIMARY KEY,
-            category TEXT NOT NULL,
-            value TEXT NOT NULL,
-            UNIQUE(category, value)
-        )""")
 
-    def catalog_list(self, category):
-        rows = self._exec(
-            "SELECT value FROM product_options WHERE category=%s ORDER BY LOWER(value)",
-            (category,), fetch="all")
-        return [r["value"] for r in rows]
+def _check_password():
+    """يطلب كلمة المرور. كلمة المرور تُحفظ في إعدادات Streamlit (Secrets) باسم app_password."""
+    correct = None
+    try:
+        correct = st.secrets["app_password"]
+    except Exception:
+        correct = None
 
-    def catalog_add(self, category, value):
-        value = (value or "").strip()
-        if not value:
-            return False
-        self._exec(
-            "INSERT INTO product_options (category, value) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-            (category, value))
+    # لو مفيش كلمة مرور متسجلة في الإعدادات، البرنامج يفتح عادي (بدون قفل)
+    if not correct:
         return True
 
-    def catalog_delete(self, category, value):
-        self._exec("DELETE FROM product_options WHERE category=%s AND value=%s", (category, value))
+    if st.session_state.get("auth_ok"):
+        return True
 
-    def search_products(self, ptype=None, brand=None, color=None, gender=None, customer=None):
-        """بحث موحّد بالنوع/البراند/اللون/الجنس/اسم العميل في الصين وأمريكا مع بعض."""
-        def _build(table, order_table, extra_cols):
-            conds, params = [], []
-            if ptype:
-                conds.append("i.product_type=%s"); params.append(ptype)
-            if brand:
-                conds.append("i.product_brand=%s"); params.append(brand)
-            if color:
-                conds.append("i.product_color=%s"); params.append(color)
-            if gender:
-                conds.append("i.product_gender=%s"); params.append(gender)
-            if customer:
-                conds.append("LOWER(TRIM(i.customer_name))=LOWER(TRIM(%s))"); params.append(customer)
-            where = (" AND " + " AND ".join(conds)) if conds else ""
-            sql = f"""SELECT i.*, o.order_number {extra_cols} FROM {table} i
-                JOIN {order_table} o ON o.id=i.order_id
-                WHERE 1=1 {where}
-                ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC"""
-            return self._exec(sql, tuple(params), fetch="all")
+    _show_logo(220)
+    st.markdown("### 🔒 Infinity Boutique Management")
+    st.write("من فضلك أدخل كلمة المرور للدخول.")
+    pw = st.text_input("كلمة المرور", type="password", key="login_pw")
+    if st.button("دخول", type="primary", key="login_btn"):
+        if pw == correct:
+            st.session_state.auth_ok = True
+            rerun()
+        else:
+            st.error("كلمة المرور غير صحيحة.")
+    return False
 
-        cn = _build("items", "orders", "")
-        usa = _build("usa_items", "usa_orders", ", o.supplier_name")
-        return cn, usa
 
-    def customers_list(self):
-        """أسماء العملاء بدون تكرار من الصين وأمريكا وبيانات العملاء المسجّلة
-        (يتجاهل الفرق بين الحروف الكبيرة والصغيرة)."""
-        rows = self._exec("""
-            SELECT DISTINCT ON (LOWER(TRIM(customer_name))) customer_name FROM (
-                SELECT customer_name FROM items WHERE TRIM(customer_name) <> ''
-                UNION ALL
-                SELECT customer_name FROM usa_items WHERE TRIM(customer_name) <> ''
-                UNION ALL
-                SELECT name AS customer_name FROM customers WHERE TRIM(name) <> ''
-            ) c
-            ORDER BY LOWER(TRIM(customer_name)), customer_name
-        """, fetch="all")
-        return [r["customer_name"] for r in rows]
+# ============================================================
+#  اتصال قاعدة البيانات Supabase (cached)
+# ============================================================
+@st.cache_resource
+def get_db():
+    cfg = dict(st.secrets["postgres"])
+    return Database(cfg)
 
-    def customer_orders_count(self, name):
-        """عدد القطع المسجّلة على العميل في الصين وأمريكا مع بعض."""
-        a = self._exec("SELECT COUNT(*) c FROM items WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
-                       (name,), fetch="one")["c"]
-        b = self._exec("SELECT COUNT(*) c FROM usa_items WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
-                       (name,), fetch="one")["c"]
-        return a + b
+db = get_db()
 
-    def rename_customer(self, old, new):
-        """تغيير اسم عميل في كل أوردراته (الصين وأمريكا) وبياناته."""
-        old = (old or "").strip()
-        new = (new or "").strip()
-        if not old or not new:
-            return False
-        self._exec("UPDATE items SET customer_name=%s WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
-                   (new, old))
-        self._exec("UPDATE usa_items SET customer_name=%s WHERE LOWER(TRIM(customer_name))=LOWER(TRIM(%s))",
-                   (new, old))
-        old_info = self.get_customer_info(old)
-        if old_info:
-            new_info = self.get_customer_info(new)
-            if new_info and new_info["id"] != old_info["id"]:
-                # الاسم الجديد مسجّل قبل كده: ندمج (نكمّل الفاضي من بيانات القديم) ونشيل القديم
-                phone = new_info["phone"] or old_info["phone"] or ""
-                address = new_info["address"] or old_info["address"] or ""
-                self._exec("UPDATE customers SET name=%s, phone=%s, address=%s WHERE id=%s",
-                           (new, phone, address, new_info["id"]))
-                self._exec("DELETE FROM customers WHERE id=%s", (old_info["id"],))
+# إنشاء جداول أمريكا وبيانات العملاء تلقائياً لو مش موجودة (مرة واحدة)
+@st.cache_resource
+def _ensure_usa_tables():
+    try:
+        db.usa_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جداول أمريكا تلقائياً ({e}).")
+    try:
+        db.customers_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جدول بيانات العملاء تلقائياً ({e}).")
+    try:
+        db.catalog_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جدول كتالوج المنتج تلقائياً ({e}).")
+    try:
+        db.shipment_init()
+    except Exception as e:
+        st.warning(f"تنبيه: لم يتم إنشاء جدول الشحنات تلقائياً ({e}).")
+    return True
+
+_ensure_usa_tables()
+
+
+def egp(v):
+    try:
+        return f"{float(v):,.2f} ج.م"
+    except (TypeError, ValueError):
+        return "0.00 ج.م"
+
+
+def _china_profit_disp(it):
+    """نص عمود الربح لقطعة صيني (يراعي الفوري والقياس وانتظار الوزن)."""
+    if it["status"] == "Ready For Sale":
+        return "فوري (لسه)"
+    if it["status"] == "Out For Fitting":
+        return "خرج للقياس"
+    if it["weight_grams"] <= 0:
+        return "انتظار الوزن"
+    return egp(it["profit_egp"])
+
+
+def _usa_profit_disp(it):
+    """نص عمود الربح لقطعة أمريكا (يراعي الفوري والقياس وانتظار الوزن)."""
+    if it["status"] == "Ready For Sale":
+        return "فوري (لسه)"
+    if it["status"] == "Out For Fitting":
+        return "خرج للقياس"
+    if (it["weight_grams"] or 0) <= 0 and it["profit_egp"] is None:
+        return "انتظار الوزن"
+    return egp(it["profit_egp"])
+
+
+def _is_loss(text):
+    """يتحقق لو القيمة في عمود الربح خسارة (سالبة)."""
+    s = str(text)
+    return s.strip().startswith("-") or "-" in s.split("ج.م")[0]
+
+
+def _style_profit(df, col="الربح"):
+    """تلوين القيم الخاسرة بالأحمر في عمود الربح (متوافق مع كل إصدارات pandas)."""
+    if col not in df.columns or df.empty:
+        return df
+
+    def color(val):
+        return "color: #d62728; font-weight: 700;" if _is_loss(val) else ""
+
+    try:
+        styler = df.style
+        # pandas الأحدث يستخدم map بدل applymap
+        if hasattr(styler, "map"):
+            return styler.map(color, subset=[col])
+        return styler.applymap(color, subset=[col])
+    except Exception:
+        return df
+
+
+def rerun():
+    st.rerun()
+
+
+def _flash(msg, form_key=None):
+    """يحفظ رسالة نجاح تظهر بعد rerun. مع form_key تظهر تحت زر الحفظ داخل الفورم."""
+    st.session_state["_flash_msg"] = (msg, form_key) if form_key else msg
+
+
+def _show_flash_here(form_key):
+    """يعرض رسالة النجاح تحت زر الحفظ داخل نفس الفورم."""
+    data = st.session_state.get("_flash_msg")
+    if data and isinstance(data, tuple) and data[1] == form_key:
+        st.success(data[0])
+        st.session_state.pop("_flash_msg", None)
+
+
+def _show_flash():
+    m = st.session_state.pop("_flash_msg", None)
+    if m and not isinstance(m, tuple):
+        st.success(m)
+
+
+# ============================================================
+#  صف الإجمالي تحت كل جدول
+# ============================================================
+import re as _re
+
+_TOTAL_SKIP = {"التاريخ", "الشهر", "السنة", "رقم الأوردر", "أوردر", "الحالة",
+               "المورد", "العميل", "المنتج", "اسم العميل", "المصروف", "ملاحظة", "ملاحظات"}
+
+
+def _to_number(v):
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).replace(",", "").strip()
+    if s == "":
+        return None
+    m = _re.match(r"^-?\d+(\.\d+)?$|^-?\d+(\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group())
+    except ValueError:
+        return None
+
+
+def _with_total(df):
+    """يضيف صف (الإجمالي) أسفل الجدول، يجمع كل عمود أرقام."""
+    if df is None or len(df) == 0:
+        return df
+    cols = list(df.columns)
+    total = {}
+    for i, c in enumerate(cols):
+        if i == 0:
+            total[c] = "الإجمالي"
+            continue
+        if c in _TOTAL_SKIP:
+            total[c] = ""
+            continue
+        cells = [x for x in df[c] if str(x).strip() != ""]
+        nums = [_to_number(x) for x in cells]
+        valid = [n for n in nums if n is not None]
+        if valid and len(valid) == len(cells):
+            s = sum(valid)
+            sample = str(df[c].iloc[0])
+            if "ج.م" in sample:
+                total[c] = f"{s:,.2f} ج.م"
+            elif "يوان" in sample:
+                total[c] = f"{s:g} يوان"
+            elif "." not in sample and s == int(s):
+                total[c] = f"{int(s)}"
             else:
-                self._exec("UPDATE customers SET name=%s, name_key=LOWER(TRIM(%s)) WHERE id=%s",
-                           (new, new, old_info["id"]))
-        return True
+                total[c] = f"{s:,.2f}"
+        else:
+            total[c] = ""
+    return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
 
-    def delete_customer(self, name):
-        """يمسح اسم عميل مالوش أي أوردرات. لو عليه أوردرات يرجع False من غير ما يمسح."""
-        if self.customer_orders_count(name) > 0:
-            return False
-        self._exec("DELETE FROM customers WHERE name_key=LOWER(TRIM(%s))", (name,))
-        return True
 
-    def delete_item(self, iid):
-        self._exec("DELETE FROM items WHERE id=%s", (iid,))
+def show_df(df, style=False):
+    """يعرض جدول مع صف إجمالي تحته. style=True لتلوين الخسارة."""
+    df2 = _with_total(df)
+    if style:
+        st.dataframe(_style_profit(df2), use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(df2, use_container_width=True, hide_index=True)
 
-    def get_item(self, iid):
-        return self._exec("SELECT * FROM items WHERE id=%s", (iid,), fetch="one")
 
-    def items_of(self, oid):
-        return self._exec("SELECT * FROM items WHERE order_id=%s ORDER BY id ASC", (oid,), fetch="all")
+def _customer_name_input(label, current, names, key, in_form=False):
+    """قائمة قابلة للبحث بأسماء العملاء (زي البحث في لوحة المعلومات)،
+    وتقبل كتابة اسم جديد غير مسجّل. توحّد الكابيتال/سمول."""
+    opts = list(names)
+    if current and not any(current.strip().lower() == n.strip().lower() for n in opts):
+        opts = [current] + opts
 
-    def recalc_order(self, oid):
-        o = self.get_order(oid)
-        if not o:
-            return
-        for it in self.items_of(oid):
-            c = self._compute(oid, it["purchase_price_yuan"], it["weight_grams"],
-                              it["selling_price_egp"], it["weight_date"])
-            self._exec(
-                """UPDATE items SET purchase_cost_egp=%s, shipping_cost_egp=%s,
-                   total_cost_egp=%s, profit_egp=%s WHERE id=%s""",
-                (c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], it["id"]))
+    idx = None
+    if current:
+        for i, n in enumerate(opts):
+            if n.strip().lower() == current.strip().lower():
+                idx = i
+                break
+    try:
+        picked = st.selectbox(label, opts, index=idx,
+                              accept_new_options=True,
+                              placeholder="اكتب اسم العميل للبحث أو أضف جديد...",
+                              key=f"{key}_pick")
+        return (picked or "").strip()
+    except TypeError:
+        # إصدار Streamlit أقدم
+        typed = st.text_input(label, value=current or "", key=f"{key}_cust_txt",
+                              placeholder="اكتب اسم العميل...")
+        t = (typed or "").strip()
+        if t and not in_form:
+            matches = [n for n in names if t.lower() in n.strip().lower()
+                       and n.strip().lower() != t.lower()]
+            for i, n in enumerate(matches[:5]):
+                if st.button(f"👤 {n}", key=f"{key}_sug_{i}", use_container_width=True):
+                    st.session_state[f"{key}_cust_txt"] = n
+                    rerun()
+        return t
 
-    # ---------- لوحة المعلومات ----------
-    def dashboard(self):
-        orders = self._exec("SELECT COUNT(*) c FROM orders", fetch="one")["c"]
-        total_pieces = self._exec("SELECT COUNT(*) c FROM items", fetch="one")["c"]
-        r = self._exec("""
-            SELECT
-                COALESCE(SUM(CASE WHEN weight_grams<=0 THEN 1 ELSE 0 END),0) awaiting,
-                COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(CASE WHEN weight_grams>0 THEN total_cost_egp ELSE 0 END),0) cost,
-                COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit,
-                COALESCE(SUM(CASE WHEN status NOT IN ('Delivered','Order Registered')
-                    THEN selling_price_egp-deposit_paid ELSE 0 END),0) outstanding
-            FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-        """, fetch="one")
-        # الربح المتوقع للقطع التي لم يصلها وزن بعد (تقدير وزن 500 جرام)
-        # نحسب فقط القطع الجاهزة للتقدير: لها سعر بيع وسعر شراء باليوان
-        ep = self._exec("""
-            SELECT
-                COALESCE(SUM(
-                    i.selling_price_egp - (
-                        i.purchase_price_yuan * o.purchase_yuan_rate
-                        + 0.5 * o.shipping_price_per_kg_yuan * o.shipping_yuan_rate
-                    )
-                ),0) expected,
-                COUNT(*) cnt
-            FROM items i JOIN orders o ON o.id=i.order_id
-            WHERE i.weight_grams<=0
-              AND i.selling_price_egp > 0
-              AND i.purchase_price_yuan > 0
-              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Order Registered')
-        """, fetch="one")
-        sc_rows = self._exec("SELECT status, COUNT(*) c FROM items GROUP BY status", fetch="all")
-        sc = {row["status"]: row["c"] for row in sc_rows}
-        return {
-            "orders": orders, "pieces": total_pieces, "awaiting": r["awaiting"] or 0,
-            "sales": r["sales"], "cost": r["cost"], "profit": r["profit"],
-            "outstanding": r["outstanding"], "expected_profit": ep["expected"],
-            "expected_count": ep["cnt"],
-            "in_transit": sc.get("In Transit", 0), "in_warehouse": sc.get("In Warehouse", 0),
-            "delivered": sc.get("Delivered", 0),
+
+def _receipts_box(folder, title="📎 صور التحويلات", key=None, collapsible=False):
+    """صندوق رفع وعرض صور. collapsible=True يضعه داخل قسم قابل للطي."""
+    k = key or folder
+    if collapsible:
+        n = len(storage.list_images(folder)) if storage.is_enabled() else 0
+        with st.expander(f"{title} ({n})", expanded=False):
+            _receipts_box_body(folder, k)
+    else:
+        st.markdown(f"##### {title}")
+        _receipts_box_body(folder, k)
+
+
+def _receipts_box_body(folder, k):
+    if not storage.is_enabled():
+        st.info("خدمة تخزين الصور غير مفعّلة بعد. (تحتاج إضافة supabase_url و supabase_key في الإعدادات.)")
+        return
+    ups = st.file_uploader("ارفع صورة أو أكثر", type=["jpg", "jpeg", "png", "webp"],
+                           accept_multiple_files=True, key=f"{k}_uploader")
+    if ups and st.button("⬆️ رفع الصور", key=f"{k}_uploadbtn"):
+        ok = 0
+        for f in ups:
+            ct = f.type or "image/jpeg"
+            success, msg = storage.upload_image(folder, f.getvalue(), f.name, ct)
+            if success:
+                ok += 1
+            else:
+                st.error(msg)
+        if ok:
+            st.success(f"تم رفع {ok} صورة.")
+            rerun()
+
+    imgs = storage.list_images(folder)
+    if imgs:
+        st.caption(f"الصور المحفوظة ({len(imgs)}):")
+        zoom_key = f"{k}_zoom"
+        # عرض الصورة المكبّرة (لو مختارة)
+        if st.session_state.get(zoom_key):
+            st.image(st.session_state[zoom_key], use_container_width=True)
+            if st.button("✖️ إغلاق العرض", key=f"{k}_zoomclose"):
+                st.session_state[zoom_key] = None
+                rerun()
+            st.divider()
+        cols = st.columns(3)
+        for i, (name, link) in enumerate(imgs):
+            with cols[i % 3]:
+                st.image(link, use_container_width=True)
+                if st.button("🔍 عرض", key=f"{k}_view_{name}"):
+                    st.session_state[zoom_key] = link
+                    rerun()
+                if st.button("🗑️ حذف", key=f"{k}_del_{name}"):
+                    if storage.delete_image(folder, name):
+                        st.success("تم الحذف.")
+                        rerun()
+                    else:
+                        st.error("تعذّر الحذف.")
+    else:
+        st.caption("لا توجد صور بعد.")
+
+
+# ============================================================
+#  حالة التنقل
+# ============================================================
+if "view" not in st.session_state:
+    st.session_state.view = "dashboard"
+if "order_id" not in st.session_state:
+    st.session_state.order_id = None
+
+
+def go(view, order_id=None):
+    st.session_state.view = view
+    if order_id is not None:
+        st.session_state.order_id = order_id
+
+
+# ============================================================
+#  بوابة كلمة المرور (تمنع كل شيء تحتها حتى الدخول)
+# ============================================================
+if not _check_password():
+    st.stop()
+
+
+def _compose_product_name(ptype, brand, color, gender):
+    """يبني اسم المنتج من النوع/البراند/اللون/الجنس."""
+    parts = [p for p in [ptype, brand, color] if p]
+    name = " ".join(parts)
+    if gender:
+        name = f"{name} ({gender})" if name else gender
+    return name.strip()
+
+
+def _product_picker(k, current=None):
+    """4 خانات اختيار: النوع / البراند / اللون / الجنس. ترجع (type, brand, color, gender).
+    current (اختياري): (ptype, brand, color, gender) القيم المحفوظة حالياً، تتحدد تلقائياً
+    في الخانة لو لسه موجودة في القايمة، عشان التعديل يبين اختيارك السابق بدل ما يفضل فاضي."""
+    cur_type, cur_brand, cur_color, cur_gender = current or (None, None, None, None)
+    types = db.catalog_list("type")
+    brands = db.catalog_list("brand")
+    colors = db.catalog_list("color")
+    genders = db.catalog_list("gender")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        idx = types.index(cur_type) if cur_type in types else None
+        ptype = st.selectbox("النوع", types, index=idx, placeholder="اختر...",
+                             key=f"{k}_ptype") if types else None
+        if not types:
+            st.caption("لا يوجد أنواع — ضِفها من ⚙️")
+    with c2:
+        idx = brands.index(cur_brand) if cur_brand in brands else None
+        brand = st.selectbox("البراند", brands, index=idx, placeholder="اختر...",
+                             key=f"{k}_pbrand") if brands else None
+        if not brands:
+            st.caption("لا يوجد براندات — ضِفها من ⚙️")
+    with c3:
+        idx = colors.index(cur_color) if cur_color in colors else None
+        color = st.selectbox("اللون", colors, index=idx, placeholder="اختر...",
+                             key=f"{k}_pcolor") if colors else None
+        if not colors:
+            st.caption("لا يوجد ألوان — ضِفها من ⚙️")
+    with c4:
+        idx = genders.index(cur_gender) if cur_gender in genders else None
+        gender = st.selectbox("الجنس", genders, index=idx, placeholder="اختر...",
+                              key=f"{k}_pgender") if genders else None
+        if not genders:
+            st.caption("لا يوجد جنس — ضِفه من ⚙️")
+    return ptype, brand, color, gender
+
+
+def _render_catalog_manager():
+    """إدارة قيم كتالوج المنتج (نوع/براند/لون/جنس) — موحّدة بين الصين وأمريكا."""
+    labels = {"type": "النوع", "brand": "البراند", "color": "اللون", "gender": "الجنس"}
+    tabs = st.tabs([f"{labels[c]}" for c in labels])
+    for tab, cat in zip(tabs, labels):
+        with tab:
+            vals = db.catalog_list(cat)
+            if vals:
+                st.write("القيم الحالية: " + "، ".join(vals))
+            c1, c2 = st.columns([3, 1])
+            new_val = c1.text_input(f"إضافة {labels[cat]} جديد", key=f"cat_add_{cat}")
+            if c2.button("➕ إضافة", key=f"cat_addbtn_{cat}"):
+                if new_val.strip():
+                    db.catalog_add(cat, new_val.strip())
+                    st.cache_data.clear()
+                    rerun()
+            if vals:
+                del_val = st.selectbox(f"مسح {labels[cat]}", vals, index=None,
+                                       placeholder="اختر قيمة للمسح...", key=f"cat_del_{cat}")
+                if del_val and st.button("🗑️ مسح القيمة المختارة", key=f"cat_delbtn_{cat}"):
+                    db.catalog_delete(cat, del_val)
+                    st.cache_data.clear()
+                    rerun()
+
+
+def _customer_info_box(name, key_prefix):
+    """صندوق بيانات تواصل العميل (تليفون + عنوان) — موحّد بين الصين وأمريكا."""
+    info = db.get_customer_info(name)
+    phone = info["phone"] if info else ""
+    address = info["address"] if info else ""
+    with st.expander("📇 بيانات التواصل (تليفون + عنوان)", expanded=bool(phone or address)):
+        c1, c2 = st.columns(2)
+        new_phone = c1.text_input("رقم التليفون", value=phone, key=f"{key_prefix}_phone")
+        new_address = c2.text_input("العنوان", value=address, key=f"{key_prefix}_address")
+        if st.button("💾 حفظ بيانات العميل", key=f"{key_prefix}_save_info"):
+            db.save_customer_info(name, new_phone.strip(), new_address.strip())
+            st.success("✅ تم حفظ بيانات العميل.")
+            rerun()
+
+
+def _render_global_customer_search():
+    """بحث موحّد باسم العميل يجيب كل أوردراته من الصين وأمريكا مع بعض."""
+    custs = db.customers_list()
+    if not custs:
+        return
+    chosen = st.selectbox(
+        "🔎 ابحث عن عميل بالاسم (الصين وأمريكا مع بعض)",
+        custs, index=None, placeholder="ابدأ الكتابة للبحث...",
+        key="global_cust_search")
+    if not chosen:
+        return
+    _customer_info_box(chosen, "global_search")
+
+    cn_items = db.items_of_customer(chosen)
+    usa_items = db.usa_items_of_customer(chosen)
+    _EXCLUDE = ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")
+    active = [it for it in cn_items if it["status"] not in _EXCLUDE] + \
+             [it for it in usa_items if it["status"] not in _EXCLUDE]
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in active)
+    tot_profit = sum((it["profit_egp"] or 0) for it in active if it["profit_egp"] is not None)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("عدد القطع", len(cn_items) + len(usa_items))
+    m2.metric("إجمالي البيع", egp(tot_sales))
+    m3.metric("المدفوع (عربون)", egp(tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_sales - tot_dep))
+    m5.metric("صافي الربح", egp(tot_profit))
+
+    rows = []
+    for it in cn_items:
+        rows.append({
+            "المصدر": "🇨🇳 الصين",
+            "رقم الأوردر": it["order_number"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _china_profit_disp(it),
+        })
+    for it in usa_items:
+        rows.append({
+            "المصدر": "🇺🇸 أمريكا",
+            "رقم الأوردر": it["order_number"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _usa_profit_disp(it),
+        })
+    if rows:
+        show_df(pd.DataFrame(rows))
+    else:
+        st.info("لا توجد قطع لهذا العميل.")
+
+
+def _render_product_search():
+    """بحث بالنوع/البراند/اللون/الجنس/اسم العميل، في الصين وأمريكا مع بعض."""
+    c1, c2, c3, c4 = st.columns(4)
+    types = db.catalog_list("type")
+    brands = db.catalog_list("brand")
+    colors = db.catalog_list("color")
+    genders = db.catalog_list("gender")
+    ptype = c1.selectbox("النوع", types, index=None, placeholder="الكل", key="psearch_type") if types else None
+    brand = c2.selectbox("البراند", brands, index=None, placeholder="الكل", key="psearch_brand") if brands else None
+    color = c3.selectbox("اللون", colors, index=None, placeholder="الكل", key="psearch_color") if colors else None
+    gender = c4.selectbox("الجنس", genders, index=None, placeholder="الكل", key="psearch_gender") if genders else None
+    custs = db.customers_list()
+    customer = st.selectbox("اسم العميل (اختياري)", custs, index=None, placeholder="الكل",
+                            key="psearch_cust") if custs else None
+
+    if not any([ptype, brand, color, gender, customer]):
+        st.caption("اختر فلتر واحد على الأقل (نوع/براند/لون/جنس/عميل) عشان تشوف النتائج.")
+        return
+
+    cn, usa = db.search_products(ptype, brand, color, gender, customer)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("قطع الصين", len(cn))
+    m2.metric("قطع أمريكا", len(usa))
+    m3.metric("الإجمالي", len(cn) + len(usa))
+
+    rows = []
+    for it in cn:
+        rows.append({
+            "المصدر": "🇨🇳 الصين",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "الحالة": STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _china_profit_disp(it),
+        })
+    for it in usa:
+        rows.append({
+            "المصدر": "🇺🇸 أمريكا",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _usa_profit_disp(it),
+        })
+    if rows:
+        show_df(pd.DataFrame(rows))
+    else:
+        st.info("لا توجد قطع مطابقة.")
+
+
+def _render_customer_manager():
+    """تعديل اسم عميل مسجّل (يتغير في كل أوردراته) أو مسح اسم مالوش أوردرات."""
+    custs = db.customers_list()
+    if not custs:
+        st.info("لا يوجد عملاء مسجّلين.")
+        return
+    chosen = st.selectbox("اختر العميل", custs, index=None,
+                          placeholder="ابدأ الكتابة للبحث...", key="cust_mgr_pick")
+    if not chosen:
+        return
+    cnt = db.customer_orders_count(chosen)
+    st.caption(f"عدد القطع المسجّلة على العميل (الصين وأمريكا): {cnt}")
+
+    new_name = st.text_input("الاسم الجديد", value=chosen, key=f"cust_mgr_new_{chosen}")
+    if st.button("💾 حفظ الاسم الجديد", type="primary", key="cust_mgr_rename"):
+        nn = new_name.strip()
+        if not nn:
+            st.error("اكتب الاسم الجديد.")
+        elif nn == chosen:
+            st.info("الاسم زي ما هو، مفيش تغيير.")
+        else:
+            db.rename_customer(chosen, nn)
+            st.cache_data.clear()
+            _flash(f"✅ تم تغيير الاسم من \"{chosen}\" إلى \"{nn}\" في كل أوردراته.")
+            rerun()
+
+    st.divider()
+    if cnt > 0:
+        st.caption("🗑️ المسح متاح فقط للأسماء اللي مالهاش أوردرات.")
+    else:
+        with st.expander("🗑️ مسح هذا الاسم"):
+            st.warning("العميل ده مالوش أوردرات. هيتم مسح اسمه وبياناته (تليفون/عنوان).")
+            if st.button("تأكيد مسح الاسم", key="cust_mgr_delete"):
+                if db.delete_customer(chosen):
+                    st.cache_data.clear()
+                    _flash(f"✅ تم مسح الاسم \"{chosen}\".")
+                    rerun()
+                else:
+                    st.error("مينفعش تمسحه، عليه أوردرات.")
+
+
+def _panel(label):
+    """لوحة منبثقة (popover) أنضف من expander؛ يرجع لـ expander لو النسخة قديمة."""
+    if hasattr(st, "popover"):
+        return st.popover(label, use_container_width=True)
+    return st.expander(label, expanded=False)
+
+
+# ============================================================
+#  شريط التنقل العلوي (بدل القايمة الجانبية)
+# ============================================================
+_show_logo(140)
+st.markdown(
+    "<h4 style='text-align:center;margin-bottom:4px;'>🧵 Infinity Boutique Management</h4>",
+    unsafe_allow_html=True)
+
+col_search, col_settings = st.columns(2)
+with col_search:
+    with _panel("🔍 بحث"):
+        t1, t2 = st.tabs(["👤 عميل", "🧦 منتج"])
+        with t1:
+            _render_global_customer_search()
+        with t2:
+            _render_product_search()
+with col_settings:
+    with _panel("⚙️ إعدادات"):
+        t1, t2 = st.tabs(["👤 العملاء", "🧦 المنتج"])
+        with t1:
+            _render_customer_manager()
+        with t2:
+            _render_catalog_manager()
+
+st.divider()
+
+USA_VIEWS = {"usa_dashboard", "usa_orders", "usa_order_details", "usa_reports"}
+_cur_view = st.session_state.get("view", "dashboard")
+in_usa = _cur_view in USA_VIEWS
+in_ledger = _cur_view == "ledger"
+in_shipping = _cur_view == "shipping_combined"
+
+# ===== التبويبات الكبيرة: الصين / أمريكا / مع شركة الشحن / حسابات شخصية =====
+big1, big2, big3, big4 = st.columns(4)
+if big1.button("🇨🇳 الصين", use_container_width=True,
+               type=("primary" if (not in_usa and not in_ledger and not in_shipping) else "secondary")):
+    go("dashboard"); rerun()
+if big2.button("🇺🇸 أمريكا", use_container_width=True,
+               type=("primary" if in_usa else "secondary")):
+    go("usa_dashboard"); rerun()
+if big3.button("🚚 مع شركة الشحن", use_container_width=True,
+               type=("primary" if in_shipping else "secondary")):
+    go("shipping_combined"); rerun()
+if big4.button("💰 حسابات شخصية", use_container_width=True,
+               type=("primary" if in_ledger else "secondary")):
+    go("ledger"); rerun()
+
+# ===== أقسام النظام المختار =====
+if in_ledger or in_shipping:
+    pass  # صفحة مستقلة بلا أقسام
+elif in_usa:
+    n1, n2, n3, n4 = st.columns(4)
+    if n1.button("📊 لوحة المعلومات", use_container_width=True, key="usa_nav_dash"):
+        go("usa_dashboard"); rerun()
+    if n2.button("📦 الأوردرات", use_container_width=True, key="usa_nav_ord"):
+        go("usa_orders"); rerun()
+    if n3.button("📈 التقارير", use_container_width=True, key="usa_nav_rep"):
+        go("usa_reports"); rerun()
+    if n4.button("🔄 تحديث", use_container_width=True, key="usa_nav_ref"):
+        st.cache_data.clear(); rerun()
+else:
+    n1, n2, n3, n4 = st.columns(4)
+    if n1.button("📊 لوحة المعلومات", use_container_width=True, key="cn_nav_dash"):
+        go("dashboard"); rerun()
+    if n2.button("📦 الأوردرات", use_container_width=True, key="cn_nav_ord"):
+        go("orders"); rerun()
+    if n3.button("📈 التقارير", use_container_width=True, key="cn_nav_rep"):
+        go("reports"); rerun()
+    if n4.button("🔄 تحديث", use_container_width=True, key="cn_nav_ref"):
+        st.cache_data.clear(); rerun()
+st.divider()
+
+
+
+def _render_customer_search(key_prefix):
+    """اختيار عميل (قابل للبحث بالكتابة) + ملخصه وكل قطعه."""
+    custs = db.customers_list()
+    if not custs:
+        st.info("لا يوجد عملاء بعد.")
+        return
+    chosen_cust = st.selectbox(
+        "اكتب أول حروف اسم العميل ثم اختر",
+        custs, index=None, placeholder="ابدأ الكتابة للبحث...",
+        key=f"{key_prefix}_cust")
+    if not chosen_cust:
+        return
+    _customer_info_box(chosen_cust, key_prefix)
+    citems = db.items_of_customer(chosen_cust)
+    # نستبعد القطع المرتجعة والفوري (غير المباعة) من كل الحسابات
+    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")]
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in active)
+    tot_bal = tot_sales - tot_dep
+    tot_yuan = sum(it["purchase_price_yuan"] or 0 for it in active)
+    tot_profit = sum((it["profit_egp"] or 0) for it in active if it["weight_grams"] > 0)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("عدد القطع", len(citems))
+    m2.metric("إجمالي البيع", egp(tot_sales))
+    m3.metric("المدفوع (عربون)", egp(tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_bal))
+    m5.metric("صافي الربح", egp(tot_profit))
+    st.caption(f"إجمالي الشراء باليوان لكل قطعه: {tot_yuan:g} يوان")
+
+    cdata = []
+    for it in citems:
+        profit = _china_profit_disp(it)
+        cdata.append({
+            "رقم الأوردر": it["order_number"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
+            "الوزن (جم)": f'{it["weight_grams"]:g}',
+            "التكلفة (ج.م)": egp(it["total_cost_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": STATUS_AR.get(it["status"], it["status"]),
+            "الربح": profit,
+        })
+    show_df(pd.DataFrame(cdata), style=True)
+
+    # تعديل قطعة كاملة مباشرة من هنا
+    st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({STATUS_AR.get(it["status"], it["status"])}) #{it["id"]}': it["id"]
+            for it in citems}
+    if opts:
+        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
+        chosen_id = opts[pick]
+        chosen_item = db.get_item(chosen_id)
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_custedit_{chosen_id}")
+
+
+# ============================================================
+#  لوحة المعلومات
+# ============================================================
+def _render_expenses_manager(key_prefix):
+    """إدارة المصاريف العامة: إضافة + قائمة + حذف + إجمالي (مشتركة بين الصين وأمريكا)."""
+    st.markdown("##### ➕ إضافة مصروف")
+    c1, c2 = st.columns(2)
+    exp_date = c1.date_input("تاريخ المصروف", value=date.today(), key=f"{key_prefix}_exp_date")
+    name = c2.text_input("نوع/اسم المصروف", key=f"{key_prefix}_exp_name",
+                         placeholder="إيجار، شحن داخلي، كهربا...")
+    c3, c4 = st.columns(2)
+    amount = _num("المبلغ (ج.م)", 0, key=f"{key_prefix}_exp_amount")
+    notes = c4.text_input("ملاحظة (اختياري)", key=f"{key_prefix}_exp_notes")
+    if st.button("💾 حفظ المصروف", type="primary", key=f"{key_prefix}_exp_save"):
+        if not name.strip():
+            st.error("اكتب اسم المصروف.")
+        elif (amount or 0) <= 0:
+            st.error("اكتب مبلغ صحيح.")
+        else:
+            db.add_expense(exp_date.isoformat(), name.strip(), amount, notes)
+            st.success("تم حفظ المصروف.")
+            rerun()
+
+    st.divider()
+    exps = db.all_expenses()
+    total = db.expenses_total()
+    st.metric("💸 إجمالي المصاريف", egp(total))
+    if exps:
+        data = [{
+            "التاريخ": e["exp_date"], "المصروف": e["name"],
+            "المبلغ": egp(e["amount"]), "ملاحظة": e["notes"] or "",
+        } for e in exps]
+        show_df(pd.DataFrame(data))
+
+        st.markdown("##### 🗑️ حذف مصروف")
+        opts = {f'{e["exp_date"]} — {e["name"]} ({egp(e["amount"])})': e["id"] for e in exps}
+        pick = st.selectbox("اختر المصروف للحذف", list(opts.keys()), key=f"{key_prefix}_exp_delpick")
+        if st.button("حذف المصروف المختار", key=f"{key_prefix}_exp_del"):
+            db.delete_expense(opts[pick])
+            st.success("تم الحذف.")
+            rerun()
+
+        # تفصيل شهري للمصاريف
+        st.markdown("##### 📅 المصاريف شهرياً")
+        m = db.expenses_by_month()
+        if m:
+            mdf = pd.DataFrame([{"الشهر": r["period"], "إجمالي المصاريف": round(r["total"], 2)} for r in m])
+            show_df(mdf)
+    else:
+        st.info("لا توجد مصاريف مسجلة بعد.")
+
+
+def _render_net_after_expenses():
+    """صافي الربح النهائي = ربح الصين + ربح أمريكا − إجمالي المصاريف."""
+    china = db.dashboard()
+    usa = db.usa_dashboard()
+    exp = db.expenses_total()
+    china_p = china["profit"]
+    usa_p = usa["profit"]
+    net = china_p + usa_p - exp
+    st.divider()
+    st.subheader("🧮 الحساب الإجمالي (الصين + أمريكا)")
+    a, b, c, d = st.columns(4)
+    a.metric("ربح الصين", egp(china_p))
+    b.metric("ربح أمريكا", egp(usa_p))
+    c.metric("إجمالي المصاريف", egp(exp))
+    d.metric("✅ الصافي النهائي", egp(net))
+
+    st.download_button(
+        "📥 تحميل نسخة احتياطية (كل الداتا)",
+        data=_build_backup(),
+        file_name=f"نسخة-احتياطية-{date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="backup_btn", use_container_width=True)
+    st.caption("احفظ الملف على فلاشة أو جوجل درايف كل فترة كنسخة أمان.")
+
+
+def view_dashboard():
+    st.header("📊 لوحة المعلومات")
+    s = db.dashboard()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("عدد الأوردرات", s["orders"])
+    c2.metric("عدد القطع", s["pieces"])
+    c3.metric("إجمالي المبيعات", egp(s["sales"]))
+    c4.metric("إجمالي التكاليف", egp(s["cost"]))
+    c5.metric("صافي الأرباح", egp(s["profit"]))
+
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("بانتظار الوزن", s["awaiting"])
+    c7.metric("في الطريق", s["in_transit"])
+    c8.metric("في المستودع", s["in_warehouse"])
+    c9.metric("تم التسليم", s["delivered"])
+    c10.metric("أرصدة مستحقة", egp(s["outstanding"]))
+
+    st.info(f"🔮 الربح المتوقع للقطع التي لم تصل بعد (بتقدير وزن 500ج لكل قطعة): **{egp(s.get('expected_profit', 0))}** — محسوب على **{s.get('expected_count', 0)} قطعة** لها سعر بيع وسعر شراء باليوان. تقدير فقط ولا يؤثر على أي حساب.")
+
+    _render_net_after_expenses()
+
+    st.divider()
+    st.subheader("👤 بحث عن عميل")
+    _render_customer_search("dash")
+
+    st.divider()
+    # استعراض القطع حسب الحالة + الدخول على أي قطعة وتعديلها
+    st.subheader("🔍 استعراض القطع حسب الحالة")
+    status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
+    # نعرض عدّاد جنب كل حالة (الاختيار يُخزَّن بالحالة نفسها ليبقى ثابتاً بعد الحفظ)
+    counts = db.status_counts()
+    picked_en = st.selectbox(
+        "اختر الحالة لعرض قطعها",
+        ITEM_STATUSES,
+        format_func=lambda en: f"{STATUS_AR[en]} ({counts.get(en, 0)})",
+        key="dash_status_filter")
+
+    status_items = db.items_by_status(picked_en)
+    if status_items:
+        # جدول سريع للقطع
+        tbl = []
+        for it in status_items:
+            profit = _china_profit_disp(it)
+            tbl.append({
+                "أوردر": it["order_number"],
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "التكلفة (ج.م)": egp(it["total_cost_egp"]),
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "العربون": egp(it["deposit_paid"]),
+                "الربح": profit,
+            })
+        show_df(pd.DataFrame(tbl), style=True)
+        st.caption(f"عدد القطع في هذه الحالة: {len(status_items)}")
+
+        # الدخول على قطعة معيّنة وتعديلها بالكامل
+        st.markdown("##### الدخول على قطعة وتعديلها")
+        opts = {
+            f'أوردر {it["order_number"]} — {it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it["id"]
+            for it in status_items
         }
+        chosen_label = st.selectbox("اختر القطعة", list(opts.keys()), key="dash_pick_item")
+        chosen_id = opts[chosen_label]
+        chosen_item = db.get_item(chosen_id)
+        oid_of_item = chosen_item["order_id"]
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _item_form(oid_of_item, item=chosen_item, form_key=f"dash_edit_{chosen_id}")
+    else:
+        st.info("لا توجد قطع في هذه الحالة.")
 
-    def weight_dates_with_counts(self):
-        """أيام الوصول (تسجيل الوزن) مع عدد القطع في كل يوم — للقائمة السريعة."""
-        return self._exec("""SELECT weight_date, COUNT(*) c FROM items
-            WHERE weight_date IS NOT NULL AND weight_grams>0
-              AND status NOT IN ('Out of Stock','Cancelled')
-            GROUP BY weight_date ORDER BY weight_date DESC""", fetch="all")
+    st.divider()
+    st.subheader("آخر الأوردرات")
+    rows = db.all_orders()[:10]
+    if rows:
+        data = []
+        for o in rows:
+            summ = db.order_summary(o["id"])
+            data.append({
+                "رقم الأوردر": o["order_number"],
+                "التاريخ": o["order_date"],
+                "عدد القطع": summ["pieces"],
+                "صافي الربح": egp(summ["profit"]),
+            })
+        show_df(pd.DataFrame(data))
+    else:
+        st.info("لا توجد أوردرات بعد. أضف أوردر جديد من صفحة الأوردرات.")
 
-    # ---------- تقارير ----------
-    def report_by_order(self):
-        return self._exec("""SELECT o.order_number, o.order_date, COUNT(i.id) pieces,
-            COALESCE(SUM(i.purchase_price_yuan),0) yuan_total,
-            COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
-            FROM orders o LEFT JOIN items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-            GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
 
-    def report_by_customer(self):
-        return self._exec("""SELECT customer_name, COUNT(*) pieces,
-            COALESCE(SUM(purchase_price_yuan),0) yuan_total,
-            COALESCE(SUM(selling_price_egp),0) sales,
-            COALESCE(SUM(deposit_paid),0) deposits,
-            COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
-            COALESCE(SUM(CASE WHEN weight_grams>0 THEN profit_egp ELSE 0 END),0) profit
-            FROM items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-            GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
+# ============================================================
+#  الأوردرات
+# ============================================================
+def view_orders():
+    st.header("📦 إدارة الأوردرات")
 
-    def report_monthly(self):
-        """أرباح شهرية بتاريخ تسليم القطعة (استلام فلوسها) مش بتاريخ الأوردر."""
-        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
-            COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
-            FROM items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
-            GROUP BY period ORDER BY period DESC""", fetch="all")
+    with st.expander("➕ إضافة أوردر جديد", expanded=False):
+        col1, col2 = st.columns(2)
+        number = col1.text_input("رقم الأوردر", key="no_num")
+        order_date = col2.date_input("تاريخ الأوردر", value=date.today(), key="no_date")
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            buy_rate = _num("سعر اليوان وقت الشراء", 0, key="no_buy")
+        with col4:
+            ship_rate = _num("سعر يوان الشحن (لاحقاً)", 0, key="no_shiprate")
+        with col5:
+            ship_kg = _num("سعر كيلو الشحن باليوان (لاحقاً)", 0, key="no_shipkg")
+        notes = st.text_input("ملاحظات", key="no_notes")
+        if st.button("حفظ الأوردر", type="primary", key="no_save"):
+            if not number.strip():
+                st.error("اكتب رقم الأوردر.")
+            else:
+                db.create_order(number.strip(), order_date.isoformat(), buy_rate, ship_rate, ship_kg, notes)
+                st.success("تم إضافة الأوردر.")
+                rerun()
 
-    def report_yearly(self):
-        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY') period, COUNT(i.id) pieces,
-            COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
-            FROM items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
-            GROUP BY period ORDER BY period DESC""", fetch="all")
+    search = st.text_input("🔍 ابحث برقم الأوردر أو التاريخ", "")
+    orders = db.all_orders()
+    if search.strip():
+        k = search.strip()
+        orders = [o for o in orders if k in o["order_number"] or k in o["order_date"]]
 
-    def all_items_detailed(self):
-        return self._exec("""SELECT o.order_number, o.order_date, i.customer_name, i.product_name,
-            i.selling_price_egp, i.purchase_price_yuan, i.weight_grams, i.deposit_paid, i.status,
-            i.purchase_cost_egp, i.shipping_cost_egp, i.total_cost_egp, i.profit_egp
-            FROM items i JOIN orders o ON o.id=i.order_id
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
+    if not orders:
+        st.info("لا توجد أوردرات.")
+        return
 
-    # ============================================================
-    #  نظام أمريكا (جداول منفصلة، حساب مبسّط)
-    # ============================================================
-    def usa_init(self):
-        """إنشاء جداول أمريكا لو مش موجودة."""
-        self._exec("""CREATE TABLE IF NOT EXISTS usa_orders (
-            id SERIAL PRIMARY KEY,
-            order_number TEXT NOT NULL,
-            order_date TEXT NOT NULL,
-            supplier_name TEXT DEFAULT '',
-            notes TEXT DEFAULT ''
-        )""")
-        self._exec("""CREATE TABLE IF NOT EXISTS usa_items (
-            id SERIAL PRIMARY KEY,
-            order_id INTEGER NOT NULL REFERENCES usa_orders(id) ON DELETE CASCADE,
-            customer_name TEXT DEFAULT '',
-            product_name TEXT DEFAULT '',
-            cost_egp DOUBLE PRECISION DEFAULT 0,
-            selling_price_egp DOUBLE PRECISION DEFAULT 0,
-            deposit_paid DOUBLE PRECISION DEFAULT 0,
-            profit_egp DOUBLE PRECISION DEFAULT 0,
-            status TEXT DEFAULT 'In Transit'
-        )""")
-        # ترحيل: النظام الجديد لأمريكا (سعر دولار وقت الشراء + سعر دولار الشحن + سعر كيلو الشحن
-        # بالدولار + وزن القطعة) — بنفس منطق حساب الصين بالظبط. أوردرات/قطع الوسيط القديمة تفضل
-        # زي ما هي كتاريخ، والنظام الجديد يتطبق على القطع الجديدة فقط.
-        self._exec("ALTER TABLE usa_orders ADD COLUMN IF NOT EXISTS purchase_usd_rate DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_orders ADD COLUMN IF NOT EXISTS shipping_usd_rate DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_orders ADD COLUMN IF NOT EXISTS shipping_price_per_kg_usd DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS purchase_price_usd DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS weight_grams DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS weight_date TEXT")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS purchase_cost_egp DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS shipping_cost_egp DOUBLE PRECISION DEFAULT 0")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS total_cost_egp DOUBLE PRECISION DEFAULT 0")
-        # نسخ تكلفة قطع نظام الوسيط القديم لعمود التكلفة الجديد مرة واحدة، عشان تفضل
-        # محسوبة صح في كل التقارير كما هي (بدون أي تغيير في قيمتها الفعلية)
-        self._exec("""UPDATE usa_items SET total_cost_egp = cost_egp
-            WHERE purchase_price_usd = 0 AND weight_grams = 0
-              AND profit_egp IS NOT NULL AND (total_cost_egp IS NULL OR total_cost_egp = 0)
-              AND cost_egp <> 0""")
-        # أعمدة تفاصيل المنتج (نوع/براند/لون/جنس) — للبحث والفلترة، بالإضافة لاسم المنتج النصي
-        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_type TEXT DEFAULT ''")
-        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_brand TEXT DEFAULT ''")
-        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_color TEXT DEFAULT ''")
-        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS product_gender TEXT DEFAULT ''")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_type TEXT DEFAULT ''")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_brand TEXT DEFAULT ''")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_color TEXT DEFAULT ''")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_gender TEXT DEFAULT ''")
-        # تاريخ التسليم (استلام فلوس القطعة): الأرباح الشهرية/السنوية بتتحسب بيه
-        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS delivered_date TEXT")
-        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS delivered_date TEXT")
-        # القطع المسلّمة قبل التحديث: نفترض تاريخ تسليمها = تاريخ أوردرها (مرة واحدة، وبعدها تقدر تعدله)
-        self._exec("""UPDATE items i SET delivered_date = o.order_date
-            FROM orders o WHERE o.id=i.order_id AND i.status='Delivered' AND i.delivered_date IS NULL""")
-        self._exec("""UPDATE usa_items i SET delivered_date = o.order_date
-            FROM usa_orders o WHERE o.id=i.order_id AND i.status='Delivered' AND i.delivered_date IS NULL""")
-        # جدول المصاريف العامة (تخص الصين وأمريكا معاً)
-        self._exec("""CREATE TABLE IF NOT EXISTS expenses (
-            id SERIAL PRIMARY KEY,
-            exp_date TEXT NOT NULL,
-            name TEXT DEFAULT '',
-            amount DOUBLE PRECISION DEFAULT 0,
-            notes TEXT DEFAULT ''
-        )""")
-        # جدول الحسابات الشخصية (دفعات لأشخاص + استرداد)
-        self._exec("""CREATE TABLE IF NOT EXISTS ledger (
-            id SERIAL PRIMARY KEY,
-            person TEXT NOT NULL,
-            entry_date TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            amount_out DOUBLE PRECISION DEFAULT 0,
-            amount_in DOUBLE PRECISION DEFAULT 0
-        )""")
-        # كروت الائتمان
-        self._exec("""CREATE TABLE IF NOT EXISTS cards (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            due_day INTEGER DEFAULT 1,
-            month_debt DOUBLE PRECISION DEFAULT 0,
-            debt_month TEXT DEFAULT ''
-        )""")
-        # سدادات الكروت
-        self._exec("""CREATE TABLE IF NOT EXISTS card_payments (
-            id SERIAL PRIMARY KEY,
-            card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
-            pay_date TEXT NOT NULL,
-            amount DOUBLE PRECISION DEFAULT 0,
-            notes TEXT DEFAULT ''
-        )""")
+    for o in orders:
+        summ = db.order_summary(o["id"])
+        with st.container(border=True):
+            cols = st.columns([2, 2, 1, 2, 2])
+            cols[0].markdown(f"**رقم:** {o['order_number']}")
+            cols[1].markdown(f"**التاريخ:** {o['order_date']}")
+            cols[2].markdown(f"**القطع:** {summ['pieces']}")
+            cols[3].markdown(f"**الربح:** {egp(summ['profit'])}")
+            if cols[4].button("📂 فتح التفاصيل", key=f"open_{o['id']}"):
+                go("order_details", o["id"]); rerun()
 
-    # ---------- كروت الائتمان ----------
-    def cards_all(self):
-        return self._exec("SELECT * FROM cards ORDER BY name", fetch="all")
 
-    def card_add(self, name, due_day=1):
-        return self._exec("INSERT INTO cards (name, due_day) VALUES (%s,%s) RETURNING id",
-                          (name, due_day), fetch="id")
+# ============================================================
+#  تفاصيل الأوردر
+# ============================================================
+def view_order_details():
+    oid = st.session_state.order_id
+    o = db.get_order(oid)
+    if not o:
+        st.error("الأوردر غير موجود.")
+        if st.button("رجوع"):
+            go("orders"); rerun()
+        return
 
-    def card_update(self, cid, name, due_day, month_debt, debt_month):
-        self._exec("""UPDATE cards SET name=%s, due_day=%s, month_debt=%s, debt_month=%s
-            WHERE id=%s""", (name, due_day, month_debt, debt_month, cid))
+    cback, ctitle = st.columns([1, 4])
+    if cback.button("← رجوع للأوردرات"):
+        go("orders"); rerun()
+    ctitle.header(f"تفاصيل الأوردر: {o['order_number']} • {o['order_date']}")
 
-    def card_set_debt(self, cid, month_debt, debt_month):
-        self._exec("UPDATE cards SET month_debt=%s, debt_month=%s WHERE id=%s",
-                   (month_debt, debt_month, cid))
+    # أسعار الأوردر
+    with st.container(border=True):
+        st.subheader("أسعار الأوردر")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            buy_rate = _num("سعر اليوان وقت الشراء", o["purchase_yuan_rate"], key=f"rate_buy_{oid}")
+        with c2:
+            ship_rate = _num("سعر يوان الشحن", o["shipping_yuan_rate"], key=f"rate_ship_{oid}")
+        with c3:
+            ship_kg = _num("سعر كيلو الشحن باليوان", o["shipping_price_per_kg_yuan"], key=f"rate_kg_{oid}")
+        st.caption("عند تعديل الأسعار يُعاد حساب كل القطع تلقائياً")
+        if st.button("💾 حفظ الأسعار وإعادة الحساب", type="primary", key=f"save_rates_{oid}"):
+            db.update_order(oid, o["order_number"], o["order_date"], buy_rate, ship_rate, ship_kg, o["notes"])
+            st.success("تم الحفظ وإعادة الحساب.")
+            rerun()
 
-    def card_delete(self, cid):
-        self._exec("DELETE FROM cards WHERE id=%s", (cid,))
+    # معلومات الأوردر
+    with st.container(border=True):
+        st.subheader("معلومات الأوردر")
+        new_num = st.text_input("رقم الأوردر", value=o["order_number"], key=f"num_{oid}")
+        new_notes = st.text_area("📝 ملاحظات", value=o["notes"] or "", key=f"notes_{oid}",
+                                 placeholder="اكتب أي ملاحظة على الأوردر هنا...")
+        if st.button("💾 حفظ معلومات الأوردر", type="primary", key=f"save_notes_{oid}"):
+            db.update_order(oid, new_num.strip() or o["order_number"], o["order_date"],
+                            o["purchase_yuan_rate"], o["shipping_yuan_rate"],
+                            o["shipping_price_per_kg_yuan"], new_notes)
+            st.success("تم الحفظ.")
+            rerun()
 
-    def card_get(self, cid):
-        return self._exec("SELECT * FROM cards WHERE id=%s", (cid,), fetch="one")
+    # صور تحويلات فلوس العملاء لهذا الأوردر
+    with st.container(border=True):
+        _receipts_box(f"order_{oid}", title="📎 مرفقات الأوردر", key=f"cn_rcpt_{oid}", collapsible=True)
 
-    def card_payments(self, cid):
-        return self._exec("""SELECT * FROM card_payments WHERE card_id=%s
-            ORDER BY pay_date::date ASC, id ASC""", (cid,), fetch="all")
+    # إضافة قطعة
+    with st.expander("➕ إضافة قطعة جديدة", expanded=False):
+        _item_form(oid, item=None, form_key="add_item")
 
-    def card_payment_add(self, cid, pay_date, amount, notes=""):
-        return self._exec(
-            "INSERT INTO card_payments (card_id, pay_date, amount, notes) VALUES (%s,%s,%s,%s) RETURNING id",
-            (cid, pay_date, amount, notes), fetch="id")
+    # جدول القطع
+    st.subheader("القطع داخل الأوردر")
+    items = db.items_of(oid)
+    if items:
+        data = []
+        for it in items:
+            profit = _china_profit_disp(it)
+            data.append({
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "تكلفة الشحن": egp(it["shipping_cost_egp"]),
+                "إجمالي التكلفة": egp(it["total_cost_egp"]),
+                "العربون": egp(it["deposit_paid"]),
+                "الحالة": STATUS_AR.get(it["status"], it["status"]),
+                "الربح": profit,
+            })
+        df = pd.DataFrame(data)
+        show_df(df, style=True)
 
-    def card_payment_update(self, pid, pay_date, amount, notes=""):
-        self._exec("UPDATE card_payments SET pay_date=%s, amount=%s, notes=%s WHERE id=%s",
-                   (pay_date, amount, notes, pid))
+        # تعديل / حذف قطعة
+        st.markdown("##### تعديل أو حذف قطعة")
+        opts = {f'{it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it["id"] for it in items}
+        chosen = st.selectbox("اختر قطعة", list(opts.keys()))
+        chosen_id = opts[chosen]
+        cedit, cdel = st.columns(2)
+        with cedit.expander("✏️ تعديل القطعة المختارة"):
+            _item_form(oid, item=db.get_item(chosen_id), form_key=f"edit_{chosen_id}")
+        if cdel.button("🗑️ حذف القطعة المختارة"):
+            db.delete_item(chosen_id)
+            st.success("تم الحذف.")
+            rerun()
+    else:
+        st.info("لا توجد قطع. أضف قطعة من الأعلى.")
 
-    def card_payment_delete(self, pid):
-        self._exec("DELETE FROM card_payments WHERE id=%s", (pid,))
+    # الإجماليات
+    s = db.order_summary(oid)
+    st.divider()
+    st.subheader("الإجماليات")
+    t1, t2, t3, t4, t5 = st.columns(5)
+    t1.metric("عدد القطع", s["pieces"])
+    t2.metric("بانتظار الوزن", s["awaiting_weight"] or 0)
+    t3.metric("إجمالي المبيعات", egp(s["sales"]))
+    t4.metric("الودائع المجمّعة", egp(s["deposits"]))
+    t5.metric("صافي الربح", egp(s["profit"]))
 
-    def card_paid_total(self, cid):
-        r = self._exec("SELECT COALESCE(SUM(amount),0) t FROM card_payments WHERE card_id=%s",
-                       (cid,), fetch="one")
-        return r["t"] if r else 0
+    st.divider()
+    with st.expander("🗑️ حذف الأوردر نهائياً"):
+        st.warning("سيتم حذف الأوردر وكل القطع اللي جواه، ومفيش رجوع بعد الحذف.")
+        if st.button("تأكيد حذف الأوردر", key=f"del_order_{oid}"):
+            db.delete_order(oid)
+            st.success("تم حذف الأوردر.")
+            go("orders")
+            rerun()
 
-    # ---------- الحسابات الشخصية ----------
-    def ledger_persons(self):
-        rows = self._exec("SELECT DISTINCT person FROM ledger WHERE person<>'' ORDER BY person", fetch="all")
-        return [r["person"] for r in rows]
 
-    def ledger_add(self, person, entry_date, description, amount_out=0, amount_in=0):
-        return self._exec(
-            """INSERT INTO ledger (person, entry_date, description, amount_out, amount_in)
-               VALUES (%s,%s,%s,%s,%s) RETURNING id""",
-            (person, entry_date, description, amount_out, amount_in), fetch="id")
+def _num(label, value, key):
+    """حقل رقمي يظهر فاضي بدل 0.00 (نص يتحوّل لرقم)."""
+    txt = st.text_input(label, value=("" if (value in (None, 0, 0.0)) else _fmt_plain(value)), key=key)
+    txt = (txt or "").strip().replace(",", "")
+    if txt == "":
+        return 0.0
+    try:
+        return float(txt)
+    except ValueError:
+        return 0.0
 
-    def ledger_delete(self, eid):
-        self._exec("DELETE FROM ledger WHERE id=%s", (eid,))
 
-    def ledger_entries(self, person):
-        return self._exec("""SELECT * FROM ledger WHERE person=%s
-            ORDER BY entry_date::date ASC, id ASC""", (person,), fetch="all")
+def _fmt_plain(v):
+    f = float(v)
+    return str(int(f)) if f == int(f) else str(f)
 
-    def ledger_all(self):
-        """كل حركات كل الأشخاص (للنسخة الاحتياطية)."""
-        return self._exec("""SELECT * FROM ledger
-            ORDER BY person ASC, entry_date::date ASC, id ASC""", fetch="all")
 
-    def ledger_summary(self, person):
-        r = self._exec("""SELECT
-            COALESCE(SUM(amount_out),0) total_out,
-            COALESCE(SUM(amount_in),0) total_in
-            FROM ledger WHERE person=%s""", (person,), fetch="one")
-        return {"total_out": r["total_out"], "total_in": r["total_in"],
-                "balance": r["total_out"] - r["total_in"]}
+def _item_form(oid, item, form_key):
+    """نموذج إضافة/تعديل قطعة مع معاينة حية."""
+    order = db.get_order(oid)
+    is_edit = item is not None
+    k = form_key  # بادئة فريدة للحقول
 
-    # ---------- المصاريف العامة ----------
-    def add_expense(self, exp_date, name, amount, notes=""):
-        return self._exec(
-            "INSERT INTO expenses (exp_date, name, amount, notes) VALUES (%s,%s,%s,%s) RETURNING id",
-            (exp_date, name, amount, notes), fetch="id")
+    # نستخدم st.form: التعديلات لا تُعيد تحميل الصفحة، والحساب/الحفظ يتم مرة واحدة عند الضغط
+    _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
+    with _form_ctx:
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.customers_list(), key=f"{k}_cust", in_form=True)
+        st.markdown("**تفاصيل المنتج**")
+        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
+        ptype, brand, color, gender = _product_picker(k, current=cur)
+        if is_edit and not any(cur):
+            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
+        c3, c4, c5 = st.columns(3)
+        with c3:
+            sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+        with c4:
+            buy_yuan = _num("سعر الشراء باليوان", item["purchase_price_yuan"] if is_edit else 0, key=f"{k}_buy")
+        with c5:
+            weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
+        c6, c7 = st.columns(2)
+        with c6:
+            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+        status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
+        cur_status_ar = STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
+        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
+        status_en = ITEM_STATUSES[status_ar_list.index(status_ar)]
 
-    def delete_expense(self, eid):
-        self._exec("DELETE FROM expenses WHERE id=%s", (eid,))
+        # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
+        new_order_id = None
+        if is_edit:
+            all_ords = db.all_orders()
+            ord_ids = [o["id"] for o in all_ords]
+            ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
+            cur_oid = item["order_id"]
+            cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
+            picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
+                                        index=cur_idx, key=f"{k}_ord")
+            new_order_id = ord_ids[ord_labels.index(picked_label)]
 
-    def all_expenses(self):
-        return self._exec("SELECT * FROM expenses ORDER BY exp_date::date DESC, id DESC", fetch="all")
+        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
+        weight_date = None
+        if weight > 0:
+            existing = None
+            if is_edit and item.get("weight_date"):
+                try:
+                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    existing = date.today()
+            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
+            weight_date = wd.isoformat()
 
-    def expenses_total(self):
-        r = self._exec("SELECT COALESCE(SUM(amount),0) t FROM expenses", fetch="one")
-        return r["t"] if r else 0
+        # معاينة الحساب — سعر الشحن بييجي من شحنة يوم الوزن لو مسجّلة، وإلا من سعر الأوردر مؤقتاً
+        sh = db.get_shipment(weight_date) if weight_date else None
+        ship_rate = sh["shipping_yuan_rate"] if sh else order["shipping_yuan_rate"]
+        ship_kg = sh["shipping_price_per_kg_yuan"] if sh else order["shipping_price_per_kg_yuan"]
+        c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"], ship_rate, ship_kg)
+        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
+        st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
+                   f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+        if weight_date and not sh:
+            st.caption("⚠️ لسه مفيش سعر شحنة مسجّل لليوم ده — المعاينة بسعر شحن الأوردر مؤقتاً. "
+                      "سجّل سعر الشحنة من تقارير الصين ⟵ تاب \"الواصل في يوم\".")
 
-    def expenses_by_month(self):
-        return self._exec("""SELECT TO_CHAR(exp_date::date,'YYYY-MM') period,
-            COALESCE(SUM(amount),0) total FROM expenses GROUP BY period""", fetch="all")
+        # تاريخ التسليم (استلام فلوس القطعة): بيتسجل لما الحالة تبقى "تم التسليم"، والأرباح الشهرية بتتحسب بيه
+        _dd_existing = date.today()
+        if is_edit and item.get("delivered_date"):
+            try:
+                _dd_existing = datetime.strptime(item["delivered_date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                _dd_existing = date.today()
+        delivered_dt = st.date_input("تاريخ التسليم (بيُستخدم لما الحالة تبقى \"تم التسليم\")",
+                                     value=_dd_existing, key=f"{k}_deliv")
+        delivered_date = delivered_dt.isoformat()
 
-    def expenses_by_year(self):
-        return self._exec("""SELECT TO_CHAR(exp_date::date,'YYYY') period,
-            COALESCE(SUM(amount),0) total FROM expenses GROUP BY period""", fetch="all")
+        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
+        submitted = st.form_submit_button(label, type="primary")
 
-    # ---------- أوردرات أمريكا ----------
-    def usa_create_order(self, number, date, buy_rate=0, ship_rate=0, ship_kg=0, supplier="", notes=""):
-        return self._exec(
-            """INSERT INTO usa_orders (order_number, order_date, purchase_usd_rate,
-               shipping_usd_rate, shipping_price_per_kg_usd, supplier_name, notes)
-               VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (number, date, buy_rate, ship_rate, ship_kg, supplier, notes), fetch="id")
+    if submitted:
+        composed = _compose_product_name(ptype, brand, color, gender)
+        product = composed if composed else (item["product_name"] if is_edit else "")
+        if not customer.strip() or not product.strip():
+            st.error("اكتب اسم العميل واختر تفاصيل المنتج (النوع على الأقل).")
+        else:
+            if is_edit:
+                db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
+                               weight, deposit, status_en, weight_date, new_order_id=new_order_id,
+                               ptype=ptype, brand=brand, color=color, gender=gender,
+                               delivered_date=delivered_date)
+                moved = new_order_id is not None and new_order_id != item["order_id"]
+                st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
+            else:
+                db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
+                               weight, deposit, status_en, weight_date,
+                               ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "",
+                               delivered_date=delivered_date)
+                st.success("✅ تم إضافة القطعة.")
+            st.cache_data.clear()
+            rerun()
 
-    def usa_update_order(self, oid, number, date, buy_rate, ship_rate, ship_kg, supplier, notes=""):
-        self._exec(
-            """UPDATE usa_orders SET order_number=%s, order_date=%s, purchase_usd_rate=%s,
-               shipping_usd_rate=%s, shipping_price_per_kg_usd=%s, supplier_name=%s, notes=%s
-               WHERE id=%s""",
-            (number, date, buy_rate, ship_rate, ship_kg, supplier, notes, oid))
-        self.usa_recalc_order(oid)
 
-    def usa_delete_order(self, oid):
-        self._exec("DELETE FROM usa_orders WHERE id=%s", (oid,))
 
-    def usa_get_order(self, oid):
-        return self._exec("SELECT * FROM usa_orders WHERE id=%s", (oid,), fetch="one")
+# ============================================================
+#  التقارير + تصدير Excel
+# ============================================================
+def view_reports():
+    st.header("📈 التقارير")
 
-    def usa_all_orders(self):
-        return self._exec("""
-            SELECT * FROM usa_orders
-            ORDER BY
-                CASE WHEN order_number ~ '^[0-9]+$' THEN 0 ELSE 1 END,
-                CASE WHEN order_number ~ '^[0-9]+$' THEN CAST(order_number AS BIGINT) ELSE NULL END DESC,
-                order_number DESC
-        """, fetch="all")
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية",
+         "💸 المصاريف", "🔮 متوقع مقابل حقيقي", "💰 أرصدة مستحقة"])
 
-    def usa_order_summary(self, oid):
-        return self._exec("""
-            SELECT COUNT(*) pieces,
-                COALESCE(SUM(CASE WHEN weight_grams>0 THEN 1 ELSE 0 END),0) with_weight,
-                COALESCE(SUM(CASE WHEN weight_grams<=0 AND profit_egp IS NULL THEN 1 ELSE 0 END),0) awaiting_weight,
-                COALESCE(SUM(CASE WHEN status='Delivered' THEN 1 ELSE 0 END),0) delivered,
-                COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(deposit_paid),0) deposits,
-                COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
-                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN total_cost_egp ELSE 0 END),0) cost,
-                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN profit_egp ELSE 0 END),0) profit
-            FROM usa_items WHERE order_id=%s AND status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-        """, (oid,), fetch="one")
+    with tab1:
+        rows = db.report_by_order()
+        df = pd.DataFrame([{
+            "رقم الأوردر": r["order_number"], "التاريخ": r["order_date"], "عدد القطع": r["pieces"],
+            "إجمالي الشراء (يوان)": round(r["yuan_total"], 2),
+            "المبيعات": round(r["sales"], 2), "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
 
-    # ---------- قطع أمريكا ----------
-    def _usa_compute(self, oid, buy_usd, weight_g, sell):
-        o = self.usa_get_order(oid)
-        return calc_item(buy_usd, weight_g, sell, o["purchase_usd_rate"],
-                         o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
+    with tab2:
+        rows = db.report_by_customer()
+        df = pd.DataFrame([{
+            "اسم العميل": r["customer_name"], "عدد القطع": r["pieces"],
+            "إجمالي الشراء (يوان)": round(r["yuan_total"], 2),
+            "المبيعات": round(r["sales"], 2),
+            "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
+            "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
 
-    def usa_add_item(self, order_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
-                     status="Order Registered", weight_date=None,
-                     ptype="", brand="", color="", gender="", delivered_date=None):
-        c = self._usa_compute(order_id, buy_usd, weight_g, sell)
-        dd = self._delivered_date_for(status, delivered_date)
-        return self._exec(
-            """INSERT INTO usa_items (order_id, customer_name, product_name, purchase_price_usd,
-               weight_grams, selling_price_egp, deposit_paid, status, weight_date,
-               purchase_cost_egp, shipping_cost_egp, total_cost_egp, cost_egp, profit_egp,
-               product_type, product_brand, product_color, product_gender, delivered_date)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (order_id, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], ptype, brand, color, gender, dd), fetch="id")
+        # 🔍 بحث باسم العميل وعرض كل بياناته
+        st.divider()
+        st.markdown("##### 🔍 بحث عن عميل بالاسم")
+        _render_customer_search("rep")
 
-    def usa_update_item(self, item_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
-                        status="Order Registered", weight_date=None, new_order_id=None,
-                        ptype=None, brand=None, color=None, gender=None, delivered_date=None):
-        it = self.usa_get_item(item_id)
-        target_oid = new_order_id if new_order_id is not None else it["order_id"]
-        c = self._usa_compute(target_oid, buy_usd, weight_g, sell)
-        dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
-        ptype = it["product_type"] if ptype is None else ptype
-        brand = it["product_brand"] if brand is None else brand
-        color = it["product_color"] if color is None else color
-        gender = it["product_gender"] if gender is None else gender
-        self._exec(
-            """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, purchase_price_usd=%s,
-               weight_grams=%s, selling_price_egp=%s, deposit_paid=%s, status=%s, weight_date=%s,
-               purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, cost_egp=%s, profit_egp=%s,
-               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s, delivered_date=%s
-               WHERE id=%s""",
-            (target_oid, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
-             c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], ptype, brand, color, gender, dd, item_id))
+    with tab3:
+        st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
+        # قائمة سريعة بكل أيام الوصول (الأحدث أولاً) مع عدد القطع
+        dcounts = db.weight_dates_with_counts()
+        chosen_day = None
+        if dcounts:
+            day_opts = [f'{r["weight_date"]}  ({r["c"]} قطعة)' for r in dcounts]
+            day_vals = [r["weight_date"] for r in dcounts]
+            sel = st.selectbox("📅 أيام وصول الشحنات (اختر يوم)", ["— اختر من القائمة —"] + day_opts,
+                               key="arr_quick_day")
+            if sel != "— اختر من القائمة —":
+                chosen_day = date.fromisoformat(day_vals[day_opts.index(sel)])
+        manual_day = st.date_input("أو اختر اليوم يدوياً", value=date.today(), key="arr_day_manual")
+        if chosen_day is None:
+            chosen_day = manual_day
+        day_str = chosen_day.isoformat()
 
-    def usa_delete_item(self, item_id):
-        self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
+        # سعر يوان الشحن لهذا اليوم — مشترك بين كل القطع الواصلة في نفس اليوم مهما كان أوردرها
+        st.markdown("##### 🚢 سعر يوان الشحن ليوم الوصول ده")
+        st.caption("سعر واحد بيتطبق على كل القطع اللي وصلت في اليوم ده من أي أوردر، بدل ما يتحسب بسعر شحن الأوردر.")
+        sh = db.get_shipment(day_str)
+        c1, c2 = st.columns(2)
+        with c1:
+            sh_rate = _num("سعر اليوان وقت الشحن", sh["shipping_yuan_rate"] if sh else 0, key=f"sh_rate_{day_str}")
+        with c2:
+            sh_kg = _num("سعر كيلو الشحن باليوان", sh["shipping_price_per_kg_yuan"] if sh else 0, key=f"sh_kg_{day_str}")
+        if st.button("💾 حفظ سعر الشحنة وإعادة حساب كل قطعها", type="primary", key=f"sh_save_{day_str}"):
+            db.save_shipment(day_str, sh_rate, sh_kg)
+            st.cache_data.clear()
+            _flash("✅ تم حفظ سعر الشحنة وإعادة حساب كل القطع اللي وصلت في هذا اليوم.")
+            rerun()
+        if not sh:
+            st.warning("لسه مفيش سعر شحنة متسجّل لليوم ده — القطع هتتحسب بسعر شحن الأوردر القديم لحد ما تحفظ السعر هنا.")
 
-    def usa_update_item_status(self, item_id, status):
-        self._exec("""UPDATE usa_items SET status=%s,
-            delivered_date = CASE WHEN %s='Delivered' THEN COALESCE(delivered_date, %s) ELSE NULL END
-            WHERE id=%s""", (status, status, _date.today().isoformat(), item_id))
+        arr = db.items_by_weight_date(day_str)
+        if arr:
+            adata = []
+            total_profit = 0.0
+            total_sales = 0.0
+            _OUT = ("Ready For Sale", "Out For Fitting")
+            for it in arr:
+                # الفوري وخرج للقياس يظهروا في القائمة لكن لا يُحسبوا في المبيعات/الأرباح
+                if it["status"] not in _OUT:
+                    total_profit += it["profit_egp"] or 0
+                    total_sales += it["selling_price_egp"] or 0
+                adata.append({
+                    "رقم الأوردر": it["order_number"],
+                    "العميل": it["customer_name"],
+                    "المنتج": it["product_name"],
+                    "شراء (يوان)": f'{it["purchase_price_yuan"]:g}',
+                    "الوزن (جم)": f'{it["weight_grams"]:g}',
+                    "سعر البيع": egp(it["selling_price_egp"]),
+                    "العربون": egp(it["deposit_paid"]),
+                    "إجمالي التكلفة": egp(it["total_cost_egp"]),
+                    "الحالة": STATUS_AR.get(it["status"], it["status"]),
+                    # الفوري وخرج للقياس بصفر عشان صف الإجمالي يجمع صح
+                    "الربح": egp(0) if it["status"] in _OUT else egp(it["profit_egp"]),
+                })
+            m1, m2, m3 = st.columns(3)
+            m1.metric("عدد القطع الواصلة", len(arr))
+            m2.metric("إجمالي مبيعاتها", egp(total_sales))
+            m3.metric("إجمالي ربحها", egp(total_profit))
+            show_df(pd.DataFrame(adata), style=True)
+        else:
+            st.info("لا توجد قطع سُجّل وزنها في هذا اليوم.")
 
-    def usa_items_by_status(self, status):
-        """كل قطع أمريكا في حالة معيّنة مع رقم الأوردر والمورد."""
-        return self._exec("""SELECT i.*, o.order_number, o.supplier_name FROM usa_items i
-            JOIN usa_orders o ON o.id=i.order_id
-            WHERE i.status=%s
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", (status,), fetch="all")
+        # صور تحويلات الشحن لهذا اليوم (الميزان + الحساب + التحويل)
+        st.divider()
+        _receipts_box(f"shipping_{day_str}",
+                      title="🚚 مرفقات الشحن (الميزان / الحساب / التحويل)",
+                      key=f"ship_{day_str}", collapsible=True)
 
-    def usa_status_counts(self):
-        rows = self._exec("SELECT status, COUNT(*) c FROM usa_items GROUP BY status", fetch="all")
-        return {r["status"]: r["c"] for r in rows}
+    with tab4:
+        st.caption("الأرباح هنا بتتحسب بتاريخ تسليم القطعة (لما الحالة تبقى \"تم التسليم\")، مش بتاريخ الأوردر. القطع الآجل أو اللي لسه ما اتسلمتش مش بتتحسب.")
+        rows = db.report_monthly()
+        df = pd.DataFrame([{
+            "الشهر": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
 
-    def usa_get_item(self, iid):
-        return self._exec("SELECT * FROM usa_items WHERE id=%s", (iid,), fetch="one")
+    with tab5:
+        rows = db.report_yearly()
+        df = pd.DataFrame([{
+            "السنة": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
 
-    def usa_items_of(self, order_id):
-        return self._exec("SELECT * FROM usa_items WHERE order_id=%s ORDER BY id ASC",
-                          (order_id,), fetch="all")
+    with tab6:
+        st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
+        _render_expenses_manager("cn_exp")
 
-    def usa_recalc_order(self, oid):
-        o = self.usa_get_order(oid)
-        if not o:
-            return
-        for it in self.usa_items_of(oid):
-            c = calc_item(it["purchase_price_usd"], it["weight_grams"], it["selling_price_egp"],
-                          o["purchase_usd_rate"], o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
-            self._exec(
-                """UPDATE usa_items SET purchase_cost_egp=%s, shipping_cost_egp=%s,
-                   total_cost_egp=%s, cost_egp=%s, profit_egp=%s WHERE id=%s""",
-                (c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-                 c["profit_egp"], it["id"]))
+    with tab7:
+        st.markdown("##### 🔮 مقارنة الربح المتوقع بالحقيقي")
+        st.caption("للقطع التي كان لها ربح متوقع (تقدير 500ج) ثم وصل وزنها وعُرف ربحها الحقيقي.")
+        rows = db.report_expected_vs_actual()
+        if rows:
+            data = []
+            for r in rows:
+                exp = r["expected"] or 0
+                act = r["actual"] or 0
+                data.append({
+                    "الأوردر": r["order_number"],
+                    "العميل": r["customer_name"],
+                    "المنتج": r["product_name"],
+                    "الوزن (جم)": f'{r["weight_grams"]:g}',
+                    "الربح المتوقع": round(exp, 2),
+                    "الربح الحقيقي": round(act, 2),
+                    "الفرق": round(act - exp, 2),
+                })
+            show_df(pd.DataFrame(data))
+            st.caption("الفرق = الحقيقي − المتوقع. لو موجب يبقى القطعة طلعت أحسن من المتوقع، ولو سالب أقل.")
+        else:
+            st.info("لا توجد قطع مكتملة الوزن للمقارنة بعد.")
 
-    def usa_items_by_weight_date(self, day):
-        """قطع أمريكا اللي اتسجّل وزنها في يوم معين."""
-        return self._exec("""SELECT i.*, o.order_number FROM usa_items i
-            JOIN usa_orders o ON o.id=i.order_id
-            WHERE i.weight_date=%s AND i.weight_grams>0
-              AND i.status NOT IN ('Out of Stock','Cancelled')
-            ORDER BY o.order_number, i.id""", (day,), fetch="all")
+    with tab8:
+        st.markdown("##### 💰 العملاء الذين عليهم مبالغ مستحقة")
+        st.caption("العملاء الذين استلموا أو في الطريق ولم يدفعوا كامل المبلغ (يشمل تسليم آجل).")
+        rows = db.report_outstanding_by_customer()
+        if rows:
+            data = [{
+                "اسم العميل": r["customer_name"],
+                "عدد القطع": r["pieces"],
+                "إجمالي البيع": round(r["sales"], 2),
+                "المدفوع (عربون)": round(r["deposits"], 2),
+                "المتبقي عليه": round(r["outstanding"], 2),
+            } for r in rows]
+            show_df(pd.DataFrame(data))
+        else:
+            st.info("لا توجد مبالغ مستحقة حالياً. 🎉")
 
-    def usa_weight_dates_with_counts(self):
-        """أيام وصول شحنات أمريكا (تسجيل الوزن) مع عدد القطع في كل يوم."""
-        return self._exec("""SELECT weight_date, COUNT(*) c FROM usa_items
-            WHERE weight_date IS NOT NULL AND weight_grams>0
-              AND status NOT IN ('Out of Stock','Cancelled')
-            GROUP BY weight_date ORDER BY weight_date DESC""", fetch="all")
+    st.divider()
+    st.download_button("📥 تصدير كل التقارير Excel", data=_build_excel(),
+                       file_name="تقارير.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       type="primary")
 
-    def usa_report_expected_vs_actual(self):
-        """مقارنة الربح المتوقع (تقدير 500ج) بالربح الحقيقي لقطع أمريكا التي وصل وزنها."""
-        return self._exec("""
-            SELECT o.order_number, i.customer_name, i.product_name,
-                i.selling_price_egp, i.purchase_price_usd, i.weight_grams, i.profit_egp AS actual,
-                (i.selling_price_egp - (
-                    i.purchase_price_usd * o.purchase_usd_rate
-                    + 0.5 * o.shipping_price_per_kg_usd * o.shipping_usd_rate
-                )) AS expected
-            FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
-            WHERE i.weight_grams > 0
-              AND i.selling_price_egp > 0
-              AND i.purchase_price_usd > 0
-              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC
-        """, fetch="all")
 
-    def usa_report_outstanding_by_customer(self):
-        """عملاء أمريكا الذين عليهم مبالغ مستحقة، مرتّبين تنازلياً."""
-        return self._exec("""
-            SELECT customer_name,
-                COUNT(*) pieces,
-                COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(deposit_paid),0) deposits,
-                COALESCE(SUM(selling_price_egp-deposit_paid),0) outstanding
-            FROM usa_items
-            WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Delivered','Order Registered')
-            GROUP BY customer_name
-            HAVING COALESCE(SUM(selling_price_egp-deposit_paid),0) > 0
-            ORDER BY outstanding DESC
-        """, fetch="all")
+def _build_excel():
+    buf = io.BytesIO()
+    items = db.all_items_detailed()
+    items_df = pd.DataFrame([{
+        "رقم الأوردر": r["order_number"], "التاريخ": r["order_date"], "العميل": r["customer_name"],
+        "المنتج": r["product_name"], "سعر البيع": r["selling_price_egp"], "شراء (يوان)": r["purchase_price_yuan"],
+        "الوزن (جم)": r["weight_grams"], "العربون": r["deposit_paid"], "الحالة": STATUS_AR.get(r["status"], r["status"]),
+        "تكلفة الشراء": r["purchase_cost_egp"], "تكلفة الشحن": r["shipping_cost_egp"],
+        "إجمالي التكلفة": r["total_cost_egp"], "الربح": r["profit_egp"],
+    } for r in items])
 
-    def usa_all_items_detailed(self):
-        return self._exec("""SELECT o.order_number, o.supplier_name, o.order_date,
-            i.customer_name, i.product_name, i.purchase_price_usd, i.weight_grams, i.cost_egp,
-            i.selling_price_egp, i.deposit_paid, i.profit_egp, i.status,
-            i.purchase_cost_egp, i.shipping_cost_egp, i.total_cost_egp
-            FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
-            ORDER BY o.order_date::date DESC, o.id DESC, i.id ASC""", fetch="all")
+    def df_of(rows, cols):
+        return pd.DataFrame([{c[1]: r[c[0]] for c in cols} for r in rows])
 
-    def usa_items_of_customer(self, name):
-        return self._exec("""SELECT i.*, o.order_number, o.supplier_name FROM usa_items i
-            JOIN usa_orders o ON o.id=i.order_id
-            WHERE LOWER(TRIM(i.customer_name))=LOWER(TRIM(%s))
-            ORDER BY o.id DESC, i.id ASC""", (name,), fetch="all")
+    by_order = df_of(db.report_by_order(), [("order_number","رقم الأوردر"),("order_date","التاريخ"),
+                     ("pieces","عدد القطع"),("yuan_total","إجمالي الشراء (يوان)"),
+                     ("sales","المبيعات"),("cost","التكاليف"),("profit","الربح")])
+    by_cust = df_of(db.report_by_customer(), [("customer_name","العميل"),("pieces","عدد القطع"),
+                    ("yuan_total","إجمالي الشراء (يوان)"),
+                    ("sales","المبيعات"),("deposits","الودائع"),("balance","الرصيد"),("profit","الربح")])
+    monthly = df_of(db.report_monthly(), [("period","الشهر"),("pieces","عدد القطع"),
+                    ("sales","المبيعات"),("cost","التكاليف"),("profit","الربح")])
+    yearly = df_of(db.report_yearly(), [("period","السنة"),("pieces","عدد القطع"),
+                   ("sales","المبيعات"),("cost","التكاليف"),("profit","الربح")])
 
-    def usa_customers_list(self):
-        """نفس قاعدة أسامي العملاء الموحّدة (الصين وأمريكا مع بعض)."""
-        return self.customers_list()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        items_df.to_excel(w, sheet_name="تفاصيل القطع", index=False)
+        by_order.to_excel(w, sheet_name="أرباح الأوردرات", index=False)
+        by_cust.to_excel(w, sheet_name="أرباح العملاء", index=False)
+        monthly.to_excel(w, sheet_name="أرباح شهرية", index=False)
+        yearly.to_excel(w, sheet_name="أرباح سنوية", index=False)
+    buf.seek(0)
+    return buf
 
-    # ---------- لوحة معلومات أمريكا ----------
-    def usa_dashboard(self):
-        orders = self._exec("SELECT COUNT(*) c FROM usa_orders", fetch="one")["c"]
-        total_pieces = self._exec("SELECT COUNT(*) c FROM usa_items", fetch="one")["c"]
-        r = self._exec("""
-            SELECT
-                COALESCE(SUM(CASE WHEN weight_grams<=0 AND profit_egp IS NULL THEN 1 ELSE 0 END),0) awaiting,
-                COALESCE(SUM(selling_price_egp),0) sales,
-                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN total_cost_egp ELSE 0 END),0) cost,
-                COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN profit_egp ELSE 0 END),0) profit,
-                COALESCE(SUM(CASE WHEN status NOT IN ('Delivered','Order Registered')
-                    THEN selling_price_egp-deposit_paid ELSE 0 END),0) outstanding
-            FROM usa_items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-        """, fetch="one")
-        # الربح المتوقع للقطع التي لم يصلها وزن بعد (تقدير وزن 500 جرام) — نفس منطق الصين
-        ep = self._exec("""
-            SELECT
-                COALESCE(SUM(
-                    i.selling_price_egp - (
-                        i.purchase_price_usd * o.purchase_usd_rate
-                        + 0.5 * o.shipping_price_per_kg_usd * o.shipping_usd_rate
-                    )
-                ),0) expected,
-                COUNT(*) cnt
-            FROM usa_items i JOIN usa_orders o ON o.id=i.order_id
-            WHERE i.weight_grams<=0
-              AND i.selling_price_egp > 0
-              AND i.purchase_price_usd > 0
-              AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting','Order Registered')
-        """, fetch="one")
-        sc_rows = self._exec("SELECT status, COUNT(*) c FROM usa_items GROUP BY status", fetch="all")
-        sc = {row["status"]: row["c"] for row in sc_rows}
-        return {
-            "orders": orders, "pieces": total_pieces, "awaiting": r["awaiting"] or 0,
-            "sales": r["sales"], "cost": r["cost"], "profit": r["profit"],
-            "outstanding": r["outstanding"], "expected_profit": ep["expected"],
-            "expected_count": ep["cnt"],
-            "in_transit": sc.get("In Transit", 0), "in_warehouse": sc.get("In Warehouse", 0),
-            "delivered": sc.get("Delivered", 0),
+
+def _build_backup():
+    """نسخة احتياطية شاملة لكل الداتا (صين + أمريكا + مصاريف) في ملف Excel."""
+    buf = io.BytesIO()
+
+    # الصين — الأوردرات
+    cn_orders = pd.DataFrame([{
+        "رقم الأوردر": o["order_number"], "التاريخ": o["order_date"],
+        "سعر يوان الشراء": o["purchase_yuan_rate"], "سعر يوان الشحن": o["shipping_yuan_rate"],
+        "سعر كيلو الشحن (يوان)": o["shipping_price_per_kg_yuan"], "ملاحظات": o["notes"],
+    } for o in db.all_orders()])
+
+    # الصين — القطع
+    cn_items = pd.DataFrame([{
+        "رقم الأوردر": r["order_number"], "التاريخ": r["order_date"], "العميل": r["customer_name"],
+        "المنتج": r["product_name"], "سعر البيع": r["selling_price_egp"], "شراء (يوان)": r["purchase_price_yuan"],
+        "الوزن (جم)": r["weight_grams"], "العربون": r["deposit_paid"],
+        "الحالة": STATUS_AR.get(r["status"], r["status"]),
+        "تكلفة الشراء": r["purchase_cost_egp"], "تكلفة الشحن": r["shipping_cost_egp"],
+        "إجمالي التكلفة": r["total_cost_egp"], "الربح": r["profit_egp"],
+    } for r in db.all_items_detailed()])
+
+    # أمريكا — الأوردرات
+    usa_orders = pd.DataFrame([{
+        "رقم الأوردر": o["order_number"], "التاريخ": o["order_date"],
+        "سعر دولار الشراء": o["purchase_usd_rate"], "سعر دولار الشحن": o["shipping_usd_rate"],
+        "سعر كيلو الشحن (دولار)": o["shipping_price_per_kg_usd"],
+        "المورد": o["supplier_name"], "ملاحظات": o["notes"],
+    } for o in db.usa_all_orders()])
+
+    # أمريكا — القطع
+    usa_items = pd.DataFrame([{
+        "رقم الأوردر": r["order_number"], "المورد": r["supplier_name"], "التاريخ": r["order_date"],
+        "العميل": r["customer_name"], "المنتج": r["product_name"],
+        "شراء (دولار)": r["purchase_price_usd"], "الوزن (جم)": r["weight_grams"],
+        "سعر البيع": r["selling_price_egp"], "العربون": r["deposit_paid"],
+        "الحالة": USA_STATUS_AR.get(r["status"], r["status"]),
+        "تكلفة الشراء": r["purchase_cost_egp"], "تكلفة الشحن": r["shipping_cost_egp"],
+        "إجمالي التكلفة": r["total_cost_egp"], "الربح": r["profit_egp"],
+    } for r in db.usa_all_items_detailed()])
+
+    # المصاريف
+    exps = pd.DataFrame([{
+        "التاريخ": e["exp_date"], "المصروف": e["name"], "المبلغ": e["amount"], "ملاحظة": e["notes"],
+    } for e in db.all_expenses()])
+
+    # الحسابات الشخصية
+    try:
+        led_rows = db.ledger_all()
+    except Exception:
+        led_rows = []
+    ledger_df = pd.DataFrame([{
+        "الشخص": r["person"], "التاريخ": r["entry_date"], "البيان": r["description"] or "",
+        "طالعة (دفعت)": r["amount_out"], "راجعة (استرد)": r["amount_in"],
+        "الصافي": (r["amount_out"] or 0) - (r["amount_in"] or 0),
+    } for r in led_rows])
+
+    def safe(df):
+        return df if not df.empty else pd.DataFrame({"لا توجد بيانات": []})
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        safe(cn_orders).to_excel(w, sheet_name="الصين - الأوردرات", index=False)
+        safe(cn_items).to_excel(w, sheet_name="الصين - القطع", index=False)
+        safe(usa_orders).to_excel(w, sheet_name="أمريكا - الأوردرات", index=False)
+        safe(usa_items).to_excel(w, sheet_name="أمريكا - القطع", index=False)
+        safe(exps).to_excel(w, sheet_name="المصاريف", index=False)
+        safe(ledger_df).to_excel(w, sheet_name="حسابات شخصية", index=False)
+    buf.seek(0)
+    return buf
+
+
+# ============================================================
+#  نظام أمريكا (واجهات منفصلة)
+# ============================================================
+def _usa_item_form(oid, item, form_key):
+    """نموذج إضافة/تعديل قطعة أمريكا (نفس منطق الصين بالظبط: سعر بالدولار + وزن + شحن)."""
+    order = db.usa_get_order(oid)
+    is_edit = item is not None
+    k = form_key
+
+    _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
+    with _form_ctx:
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.usa_customers_list(), key=f"{k}_cust", in_form=True)
+        st.markdown("**تفاصيل المنتج**")
+        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
+        ptype, brand, color, gender = _product_picker(k, current=cur)
+        if is_edit and not any(cur):
+            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
+        c3, c4, c5 = st.columns(3)
+        with c3:
+            sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+        with c4:
+            buy_usd = _num("سعر الشراء بالدولار", item["purchase_price_usd"] if is_edit else 0, key=f"{k}_buy")
+        with c5:
+            weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
+        c6, c7 = st.columns(2)
+        with c6:
+            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+        status_ar_list = [USA_STATUS_AR[s] for s in USA_STATUSES]
+        cur_status_ar = USA_STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
+        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
+        status_en = USA_STATUSES[status_ar_list.index(status_ar)]
+
+        # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
+        new_order_id = None
+        if is_edit:
+            all_ords = db.usa_all_orders()
+            ord_ids = [o["id"] for o in all_ords]
+            ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
+            cur_oid = item["order_id"]
+            cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
+            picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
+                                        index=cur_idx, key=f"{k}_ord")
+            new_order_id = ord_ids[ord_labels.index(picked_label)]
+
+        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
+        weight_date = None
+        if weight > 0:
+            existing = None
+            if is_edit and item.get("weight_date"):
+                try:
+                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    existing = date.today()
+            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
+            weight_date = wd.isoformat()
+
+        # معاينة الحساب
+        c = calc_item(buy_usd, weight, sell, order["purchase_usd_rate"],
+                      order["shipping_usd_rate"], order["shipping_price_per_kg_usd"])
+        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
+        if status_en == "Ready For Sale":
+            st.caption("🏷️ فوري (للبيع): مش محسوب في الأرباح ولا الخسائر لحد ما يتباع.")
+        else:
+            st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
+                       f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+
+        # تاريخ التسليم (استلام فلوس القطعة): بيتسجل لما الحالة تبقى "تم التسليم"، والأرباح الشهرية بتتحسب بيه
+        _dd_existing = date.today()
+        if is_edit and item.get("delivered_date"):
+            try:
+                _dd_existing = datetime.strptime(item["delivered_date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                _dd_existing = date.today()
+        delivered_dt = st.date_input("تاريخ التسليم (بيُستخدم لما الحالة تبقى \"تم التسليم\")",
+                                     value=_dd_existing, key=f"{k}_deliv")
+        delivered_date = delivered_dt.isoformat()
+
+        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
+        submitted = st.form_submit_button(label, type="primary")
+
+    if submitted:
+        composed = _compose_product_name(ptype, brand, color, gender)
+        product = composed if composed else (item["product_name"] if is_edit else "")
+        if not customer.strip() and not product.strip():
+            st.error("اكتب اسم العميل أو اختر تفاصيل المنتج على الأقل.")
+        else:
+            if is_edit:
+                db.usa_update_item(item["id"], customer.strip(), product.strip(), buy_usd, sell,
+                                   weight, deposit, status_en, weight_date, new_order_id=new_order_id,
+                                   ptype=ptype, brand=brand, color=color, gender=gender,
+                               delivered_date=delivered_date)
+                moved = new_order_id is not None and new_order_id != item["order_id"]
+                st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
+            else:
+                db.usa_add_item(oid, customer.strip(), product.strip(), buy_usd, sell,
+                                weight, deposit, status_en, weight_date,
+                                ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "",
+                               delivered_date=delivered_date)
+                st.success("✅ تم إضافة القطعة.")
+            st.cache_data.clear()
+            rerun()
+
+
+def view_usa_dashboard():
+    st.header("📊 لوحة معلومات أمريكا")
+    d = db.usa_dashboard()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("عدد الأوردرات", d["orders"])
+    c2.metric("عدد القطع", d["pieces"])
+    c3.metric("إجمالي المبيعات", egp(d["sales"]))
+    c4.metric("إجمالي التكاليف", egp(d["cost"]))
+    c5.metric("صافي الأرباح", egp(d["profit"]))
+
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("بانتظار الوزن", d["awaiting"])
+    c7.metric("في الطريق", d["in_transit"])
+    c8.metric("في المستودع", d["in_warehouse"])
+    c9.metric("تم التسليم", d["delivered"])
+    c10.metric("أرصدة مستحقة", egp(d["outstanding"]))
+
+    st.info(f"🔮 الربح المتوقع للقطع التي لم تصل بعد (بتقدير وزن 500ج لكل قطعة): **{egp(d.get('expected_profit', 0))}** — محسوب على **{d.get('expected_count', 0)} قطعة** لها سعر بيع وسعر شراء بالدولار. تقدير فقط ولا يؤثر على أي حساب.")
+
+    _render_net_after_expenses()
+
+    st.divider()
+    st.subheader("👤 بحث عن عميل")
+    _render_usa_customer_search("usa_dash")
+
+    st.divider()
+    # استعراض القطع حسب الحالة (نفس ترتيب الصين)
+    st.subheader("🔍 استعراض القطع حسب الحالة")
+    counts = db.usa_status_counts()
+    picked_en = st.selectbox(
+        "اختر الحالة لعرض قطعها",
+        USA_STATUSES,
+        format_func=lambda en: f"{USA_STATUS_AR[en]} ({counts.get(en, 0)})",
+        key="usa_dash_status_filter")
+    status_items = db.usa_items_by_status(picked_en)
+    if status_items:
+        tbl = []
+        for it in status_items:
+            tbl.append({
+                "أوردر": it["order_number"],
+                "المورد": it["supplier_name"],
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "التكلفة": egp(it["total_cost_egp"]),
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "العربون": egp(it["deposit_paid"]),
+                "الربح": _usa_profit_disp(it),
+            })
+        show_df(pd.DataFrame(tbl), style=True)
+        st.caption(f"عدد القطع في هذه الحالة: {len(status_items)}")
+
+        st.markdown("##### الدخول على قطعة وتعديلها")
+        opts = {
+            f'أوردر {it["order_number"]} — {it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it
+            for it in status_items
         }
+        chosen_label = st.selectbox("اختر القطعة", list(opts.keys()), key="usa_dash_pick_item")
+        chosen_item = opts[chosen_label]
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"usa_dash_edit_{chosen_item['id']}")
+    else:
+        st.info("لا توجد قطع في هذه الحالة.")
 
-    # ---------- تقارير أمريكا ----------
-    def usa_report_by_order(self):
-        return self._exec("""SELECT o.order_number, o.order_date, o.supplier_name, COUNT(i.id) pieces,
-            COALESCE(SUM(i.purchase_price_usd),0) usd_total,
-            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
-            FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-            GROUP BY o.id ORDER BY o.order_date::date DESC, o.id DESC""", fetch="all")
+    st.divider()
+    st.subheader("آخر أوردرات أمريكا")
+    orders = db.usa_all_orders()
+    if orders:
+        data = []
+        for o in orders[:10]:
+            summ = db.usa_order_summary(o["id"])
+            data.append({
+                "رقم الأوردر": o["order_number"],
+                "المورد": o["supplier_name"],
+                "التاريخ": o["order_date"],
+                "عدد القطع": summ["pieces"],
+                "صافي الربح": egp(summ["profit"]),
+            })
+        show_df(pd.DataFrame(data))
+    else:
+        st.info("لا توجد أوردرات أمريكا بعد. أضف من صفحة الأوردرات.")
 
-    def usa_report_by_customer(self):
-        return self._exec("""SELECT customer_name, COUNT(*) pieces,
-            COALESCE(SUM(purchase_price_usd),0) usd_total,
-            COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(selling_price_egp),0) sales,
-            COALESCE(SUM(deposit_paid),0) deposits,
-            COALESCE(SUM(selling_price_egp-deposit_paid),0) balance,
-            COALESCE(SUM(CASE WHEN profit_egp IS NOT NULL THEN profit_egp ELSE 0 END),0) profit
-            FROM usa_items WHERE status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
-            GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
-    def usa_report_monthly(self):
-        """أرباح شهرية بتاريخ تسليم القطعة (استلام فلوسها) مش بتاريخ الأوردر."""
-        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
-            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
-            FROM usa_items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
-            GROUP BY period ORDER BY period DESC""", fetch="all")
+def _render_usa_customer_search(key_prefix):
+    custs = db.usa_customers_list()
+    if not custs:
+        st.info("لا يوجد عملاء بعد.")
+        return
+    chosen = st.selectbox(
+        "اكتب أول حروف اسم العميل ثم اختر",
+        custs, index=None, placeholder="ابدأ الكتابة للبحث...",
+        key=f"{key_prefix}_cust")
+    if not chosen:
+        return
+    _customer_info_box(chosen, key_prefix)
+    citems = db.usa_items_of_customer(chosen)
+    active = [it for it in citems if it["status"] not in ("Out of Stock", "Cancelled", "Ready For Sale", "Out For Fitting")]
+    tot_sales = sum(it["selling_price_egp"] or 0 for it in active)
+    tot_dep = sum(it["deposit_paid"] or 0 for it in active)
+    tot_bal = tot_sales - tot_dep
+    tot_usd = sum(it["purchase_price_usd"] or 0 for it in active)
+    tot_profit = sum((it["profit_egp"] or 0) for it in active if it["profit_egp"] is not None)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("عدد القطع", len(citems))
+    m2.metric("إجمالي البيع", egp(tot_sales))
+    m3.metric("المدفوع (عربون)", egp(tot_dep))
+    m4.metric("المتبقي عليه", egp(tot_bal))
+    m5.metric("صافي الربح", egp(tot_profit))
+    st.caption(f"إجمالي الشراء بالدولار لكل قطعه: {tot_usd:g} دولار")
 
-    def usa_report_yearly(self):
-        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY') period, COUNT(i.id) pieces,
-            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
-            COALESCE(SUM(i.selling_price_egp),0) sales,
-            COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
-            FROM usa_items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
-            GROUP BY period ORDER BY period DESC""", fetch="all")
+    cdata = []
+    for it in citems:
+        cdata.append({
+            "رقم الأوردر": it["order_number"],
+            "المورد": it["supplier_name"],
+            "المنتج": it["product_name"],
+            "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+            "الوزن (جم)": f'{it["weight_grams"]:g}',
+            "التكلفة (ج.م)": egp(it["total_cost_egp"]),
+            "سعر البيع": egp(it["selling_price_egp"]),
+            "العربون": egp(it["deposit_paid"]),
+            "المتبقي": egp((it["selling_price_egp"] or 0) - (it["deposit_paid"] or 0)),
+            "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+            "الربح": _usa_profit_disp(it),
+        })
+    show_df(pd.DataFrame(cdata), style=True)
+
+    # تعديل قطعة كاملة مباشرة من هنا
+    st.markdown("##### ✏️ تعديل قطعة من قطع العميل")
+    opts = {f'{it["product_name"]} — أوردر {it["order_number"]} ({USA_STATUS_AR.get(it["status"], it["status"])}) #{it["id"]}': it
+            for it in citems}
+    if opts:
+        pick = st.selectbox("اختر القطعة", list(opts.keys()), key=f"{key_prefix}_editpick")
+        chosen_item = opts[pick]
+        with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+            _usa_item_form(chosen_item["order_id"], item=chosen_item, form_key=f"{key_prefix}_custedit_{chosen_item['id']}")
+
+
+def view_usa_orders():
+    st.header("📦 أوردرات أمريكا")
+    with st.expander("➕ إضافة أوردر جديد", expanded=False):
+        col1, col2 = st.columns(2)
+        number = col1.text_input("رقم الأوردر", key="usa_no_num")
+        order_date = col2.date_input("تاريخ الأوردر", value=date.today(), key="usa_no_date")
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            buy_rate = _num("سعر الدولار وقت الشراء", 0, key="usa_no_buy")
+        with col4:
+            ship_rate = _num("سعر دولار الشحن (لاحقاً)", 0, key="usa_no_shiprate")
+        with col5:
+            ship_kg = _num("سعر كيلو الشحن بالدولار (لاحقاً)", 0, key="usa_no_shipkg")
+        supplier = st.text_input("اسم الموقع/المورد", key="usa_no_supplier")
+        notes = st.text_input("ملاحظات", key="usa_no_notes")
+        if st.button("حفظ الأوردر", type="primary", key="usa_no_save"):
+            if not number.strip():
+                st.error("اكتب رقم الأوردر.")
+            else:
+                db.usa_create_order(number.strip(), order_date.isoformat(), buy_rate, ship_rate,
+                                    ship_kg, supplier.strip(), notes)
+                st.success("تم إضافة الأوردر.")
+                rerun()
+
+    search = st.text_input("🔍 ابحث برقم الأوردر أو المورد", "", key="usa_search")
+    orders = db.usa_all_orders()
+    if search.strip():
+        k = search.strip().lower()
+        orders = [o for o in orders if k in o["order_number"].lower()
+                  or k in (o["supplier_name"] or "").lower() or k in o["order_date"]]
+    if not orders:
+        st.info("لا توجد أوردرات.")
+        return
+    for o in orders:
+        summ = db.usa_order_summary(o["id"])
+        with st.container(border=True):
+            cols = st.columns([2, 2, 1, 2, 2])
+            cols[0].markdown(f"**رقم:** {o['order_number']}")
+            cols[1].markdown(f"**المورد:** {o['supplier_name'] or '—'}")
+            cols[2].markdown(f"**القطع:** {summ['pieces']}")
+            cols[3].markdown(f"**الربح:** {egp(summ['profit'])}")
+            if cols[4].button("📂 فتح التفاصيل", key=f"usa_open_{o['id']}"):
+                go("usa_order_details", o["id"]); rerun()
+
+
+def view_usa_order_details():
+    oid = st.session_state.order_id
+    o = db.usa_get_order(oid)
+    if not o:
+        st.error("الأوردر غير موجود.")
+        if st.button("رجوع"):
+            go("usa_orders"); rerun()
+        return
+    cback, ctitle = st.columns([1, 4])
+    if cback.button("← رجوع للأوردرات"):
+        go("usa_orders"); rerun()
+    ctitle.header(f"أوردر أمريكا: {o['order_number']} • {o['order_date']}")
+
+    # أسعار الأوردر
+    with st.container(border=True):
+        st.subheader("أسعار الأوردر")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            buy_rate = _num("سعر الدولار وقت الشراء", o["purchase_usd_rate"], key=f"usa_rate_buy_{oid}")
+        with c2:
+            ship_rate = _num("سعر دولار الشحن", o["shipping_usd_rate"], key=f"usa_rate_ship_{oid}")
+        with c3:
+            ship_kg = _num("سعر كيلو الشحن بالدولار", o["shipping_price_per_kg_usd"], key=f"usa_rate_kg_{oid}")
+        st.caption("عند تعديل الأسعار يُعاد حساب كل القطع تلقائياً")
+        if st.button("💾 حفظ الأسعار وإعادة الحساب", type="primary", key=f"usa_save_rates_{oid}"):
+            db.usa_update_order(oid, o["order_number"], o["order_date"], buy_rate, ship_rate,
+                                ship_kg, o["supplier_name"] or "", o["notes"] or "")
+            st.success("تم الحفظ وإعادة الحساب.")
+            rerun()
+
+    # معلومات الأوردر
+    with st.container(border=True):
+        st.subheader("معلومات الأوردر")
+        c1, c2 = st.columns(2)
+        new_num = c1.text_input("رقم الأوردر", value=o["order_number"], key=f"usa_num_{oid}")
+        new_supplier = c2.text_input("اسم الموقع/المورد", value=o["supplier_name"] or "", key=f"usa_sup_{oid}")
+        new_notes = st.text_area("📝 ملاحظات", value=o["notes"] or "", key=f"usa_notes_{oid}")
+        if st.button("💾 حفظ معلومات الأوردر", type="primary", key=f"usa_savord_{oid}"):
+            db.usa_update_order(oid, new_num.strip() or o["order_number"], o["order_date"],
+                                o["purchase_usd_rate"], o["shipping_usd_rate"],
+                                o["shipping_price_per_kg_usd"], new_supplier.strip(), new_notes)
+            st.success("تم الحفظ.")
+            rerun()
+
+    # صور تحويلات فلوس العملاء لهذا الأوردر
+    with st.container(border=True):
+        _receipts_box(f"usa_order_{oid}", title="📎 مرفقات الأوردر", key=f"usa_rcpt_{oid}", collapsible=True)
+
+    with st.expander("➕ إضافة قطعة جديدة", expanded=False):
+        _usa_item_form(oid, item=None, form_key="usa_add_item")
+
+    st.subheader("القطع داخل الأوردر")
+    items = db.usa_items_of(oid)
+    if items:
+        data = []
+        for it in items:
+            data.append({
+                "العميل": it["customer_name"],
+                "المنتج": it["product_name"],
+                "سعر البيع": egp(it["selling_price_egp"]),
+                "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+                "الوزن (جم)": f'{it["weight_grams"]:g}',
+                "تكلفة الشحن": egp(it["shipping_cost_egp"]),
+                "إجمالي التكلفة": egp(it["total_cost_egp"]),
+                "العربون": egp(it["deposit_paid"]),
+                "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+                "الربح": _usa_profit_disp(it),
+            })
+        show_df(pd.DataFrame(data), style=True)
+
+        st.markdown("##### تعديل أو حذف قطعة")
+        opts = {f'{it["customer_name"]} — {it["product_name"]} (#{it["id"]})': it["id"] for it in items}
+        chosen = st.selectbox("اختر قطعة", list(opts.keys()), key=f"usa_pick_{oid}")
+        chosen_id = opts[chosen]
+        cedit, cdel = st.columns(2)
+        chosen_item = next(it for it in items if it["id"] == chosen_id)
+        with cedit.expander("✏️ تعديل القطعة المختارة"):
+            _usa_item_form(oid, item=chosen_item, form_key=f"usa_edit_{chosen_id}")
+        if cdel.button("🗑️ حذف القطعة المختارة", key=f"usa_del_{oid}"):
+            db.usa_delete_item(chosen_id)
+            st.success("تم الحذف.")
+            rerun()
+    else:
+        st.info("لا توجد قطع. أضف قطعة من الأعلى.")
+
+    s = db.usa_order_summary(oid)
+    st.divider()
+    st.subheader("الإجماليات")
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
+    t1.metric("عدد القطع", s["pieces"])
+    t2.metric("بانتظار الوزن", s["awaiting_weight"] or 0)
+    t3.metric("إجمالي المبيعات", egp(s["sales"]))
+    t4.metric("إجمالي التكلفة", egp(s["cost"]))
+    t5.metric("الودائع المجمّعة", egp(s["deposits"]))
+    t6.metric("صافي الربح", egp(s["profit"]))
+
+    st.divider()
+    with st.expander("🗑️ حذف الأوردر نهائياً"):
+        st.warning("سيتم حذف الأوردر وكل القطع اللي جواه، ومفيش رجوع بعد الحذف.")
+        if st.button("تأكيد حذف الأوردر", key=f"usa_del_order_{oid}"):
+            db.usa_delete_order(oid)
+            st.success("تم حذف الأوردر.")
+            go("usa_orders")
+            rerun()
+
+
+def view_usa_reports():
+    st.header("📈 تقارير أمريكا")
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        ["أرباح الأوردرات", "أرباح العملاء", "الواصل في يوم", "أرباح شهرية", "أرباح سنوية",
+         "💸 المصاريف", "🔮 متوقع مقابل حقيقي", "💰 أرصدة مستحقة"])
+
+    with tab1:
+        rows = db.usa_report_by_order()
+        df = pd.DataFrame([{
+            "رقم الأوردر": r["order_number"], "المورد": r["supplier_name"],
+            "التاريخ": r["order_date"], "عدد القطع": r["pieces"],
+            "إجمالي الشراء (دولار)": round(r["usd_total"], 2),
+            "المبيعات": round(r["sales"], 2), "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
+
+    with tab2:
+        rows = db.usa_report_by_customer()
+        df = pd.DataFrame([{
+            "اسم العميل": r["customer_name"], "عدد القطع": r["pieces"],
+            "إجمالي الشراء (دولار)": round(r["usd_total"], 2),
+            "المبيعات": round(r["sales"], 2),
+            "الودائع": round(r["deposits"], 2), "الرصيد المتبقي": round(r["balance"], 2),
+            "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
+
+        st.divider()
+        st.markdown("##### 🔍 بحث عن عميل بالاسم")
+        _render_usa_customer_search("usa_rep")
+
+    with tab3:
+        st.markdown("##### ربح القطع التي وصلت (سُجّل وزنها) في يوم معين")
+        dcounts = db.usa_weight_dates_with_counts()
+        chosen_day = None
+        if dcounts:
+            day_opts = [f'{r["weight_date"]}  ({r["c"]} قطعة)' for r in dcounts]
+            day_vals = [r["weight_date"] for r in dcounts]
+            sel = st.selectbox("📅 أيام وصول الشحنات (اختر يوم)", ["— اختر من القائمة —"] + day_opts,
+                               key="usa_arr_quick_day")
+            if sel != "— اختر من القائمة —":
+                chosen_day = date.fromisoformat(day_vals[day_opts.index(sel)])
+        manual_day = st.date_input("أو اختر اليوم يدوياً", value=date.today(), key="usa_arr_day_manual")
+        if chosen_day is None:
+            chosen_day = manual_day
+        day_str = chosen_day.isoformat()
+        arr = db.usa_items_by_weight_date(day_str)
+        if arr:
+            adata = []
+            total_profit = 0.0
+            total_sales = 0.0
+            _OUT = ("Ready For Sale", "Out For Fitting")
+            for it in arr:
+                if it["status"] not in _OUT:
+                    total_profit += it["profit_egp"] or 0
+                    total_sales += it["selling_price_egp"] or 0
+                adata.append({
+                    "رقم الأوردر": it["order_number"],
+                    "العميل": it["customer_name"],
+                    "المنتج": it["product_name"],
+                    "شراء (دولار)": f'{it["purchase_price_usd"]:g}',
+                    "الوزن (جم)": f'{it["weight_grams"]:g}',
+                    "سعر البيع": egp(it["selling_price_egp"]),
+                    "العربون": egp(it["deposit_paid"]),
+                    "إجمالي التكلفة": egp(it["total_cost_egp"]),
+                    "الحالة": USA_STATUS_AR.get(it["status"], it["status"]),
+                    "الربح": egp(0) if it["status"] in _OUT else egp(it["profit_egp"]),
+                })
+            m1, m2, m3 = st.columns(3)
+            m1.metric("عدد القطع الواصلة", len(arr))
+            m2.metric("إجمالي مبيعاتها", egp(total_sales))
+            m3.metric("إجمالي ربحها", egp(total_profit))
+            show_df(pd.DataFrame(adata), style=True)
+        else:
+            st.info("لا توجد قطع سُجّل وزنها في هذا اليوم.")
+
+        st.divider()
+        _receipts_box(f"usa_shipping_{day_str}",
+                      title="🚚 مرفقات الشحن (الميزان / الحساب / التحويل)",
+                      key=f"usa_ship_{day_str}", collapsible=True)
+
+    with tab4:
+        st.caption("الأرباح هنا بتتحسب بتاريخ تسليم القطعة (لما الحالة تبقى \"تم التسليم\")، مش بتاريخ الأوردر. القطع الآجل أو اللي لسه ما اتسلمتش مش بتتحسب.")
+        rows = db.usa_report_monthly()
+        df = pd.DataFrame([{
+            "الشهر": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
+
+    with tab5:
+        rows = db.usa_report_yearly()
+        df = pd.DataFrame([{
+            "السنة": r["period"], "عدد القطع": r["pieces"], "المبيعات": round(r["sales"], 2),
+            "التكاليف": round(r["cost"], 2), "الربح": round(r["profit"], 2),
+        } for r in rows])
+        show_df(df)
+
+    with tab6:
+        st.caption("المصاريف عامة وتخص الصين وأمريكا معاً، وتُخصم من الصافي النهائي في لوحة المعلومات.")
+        _render_expenses_manager("usa_exp")
+
+    with tab7:
+        st.markdown("##### 🔮 مقارنة الربح المتوقع بالحقيقي")
+        st.caption("للقطع التي كان لها ربح متوقع (تقدير 500ج) ثم وصل وزنها وعُرف ربحها الحقيقي.")
+        rows = db.usa_report_expected_vs_actual()
+        if rows:
+            data = []
+            for r in rows:
+                exp = r["expected"] or 0
+                act = r["actual"] or 0
+                data.append({
+                    "الأوردر": r["order_number"],
+                    "العميل": r["customer_name"],
+                    "المنتج": r["product_name"],
+                    "الوزن (جم)": f'{r["weight_grams"]:g}',
+                    "الربح المتوقع": round(exp, 2),
+                    "الربح الحقيقي": round(act, 2),
+                    "الفرق": round(act - exp, 2),
+                })
+            show_df(pd.DataFrame(data))
+            st.caption("الفرق = الحقيقي − المتوقع. لو موجب يبقى القطعة طلعت أحسن من المتوقع، ولو سالب أقل.")
+        else:
+            st.info("لا توجد قطع مكتملة الوزن للمقارنة بعد.")
+
+    with tab8:
+        st.markdown("##### 💰 العملاء الذين عليهم مبالغ مستحقة")
+        st.caption("العملاء الذين استلموا أو في الطريق ولم يدفعوا كامل المبلغ (يشمل تسليم آجل).")
+        rows = db.usa_report_outstanding_by_customer()
+        if rows:
+            data = [{
+                "اسم العميل": r["customer_name"],
+                "عدد القطع": r["pieces"],
+                "إجمالي البيع": round(r["sales"], 2),
+                "المدفوع (عربون)": round(r["deposits"], 2),
+                "المتبقي عليه": round(r["outstanding"], 2),
+            } for r in rows]
+            show_df(pd.DataFrame(data))
+        else:
+            st.info("لا توجد مبالغ مستحقة حالياً. 🎉")
+
+
+# ============================================================
+#  حسابات شخصية (بند مستقل - شبه شيت إكسل)
+# ============================================================
+def _render_cards():
+    st.caption("سجّل كروت الائتمان، مديونية كل شهر، والسدادات — مع تنبيه قرب موعد الاستحقاق.")
+
+    # إضافة كارت جديد
+    with st.expander("➕ إضافة كارت جديد", expanded=False):
+        c1, c2 = st.columns([2, 1])
+        cname = c1.text_input("اسم الكارت", key="card_new_name", placeholder="مثال: CIB, بنك مصر...")
+        cday = c2.number_input("يوم الاستحقاق من كل شهر", min_value=1, max_value=31, value=1, key="card_new_day")
+        if st.button("💾 حفظ الكارت", type="primary", key="card_new_save"):
+            if not cname.strip():
+                st.error("اكتب اسم الكارت.")
+            else:
+                db.card_add(cname.strip(), int(cday))
+                st.cache_data.clear()
+                st.success("✅ تم إضافة الكارت.")
+
+    cards = db.cards_all()
+    if not cards:
+        st.info("لا توجد كروت بعد. أضف كارت من الأعلى.")
+        return
+
+    # تنبيهات الاستحقاق
+    today = date.today()
+    for c in cards:
+        paid = db.card_paid_total(c["id"])
+        remaining = (c["month_debt"] or 0) - paid
+        if remaining > 0:
+            due_day = c["due_day"] or 1
+            # حساب أيام متبقية على الاستحقاق هذا الشهر
+            try:
+                due_date = today.replace(day=min(due_day, 28))
+            except Exception:
+                due_date = today
+            if due_date < today:
+                # الاستحقاق فات هذا الشهر → الشهر الجاي
+                import calendar as _cal
+                m = today.month + 1
+                y = today.year + (1 if m > 12 else 0)
+                m = 1 if m > 12 else m
+                due_date = date(y, m, min(due_day, _cal.monthrange(y, m)[1]))
+            days_left = (due_date - today).days
+            if days_left <= 5:
+                st.warning(f"⏰ كارت **{c['name']}**: باقي {days_left} يوم على الاستحقاق ({due_date.isoformat()}) — متبقّي {egp(remaining)}")
+
+    st.divider()
+    # اختيار كارت للعرض/الإدارة
+    labels = [f'{c["name"]} (استحقاق يوم {c["due_day"]})' for c in cards]
+    idx = st.selectbox("اختر الكارت", range(len(cards)), format_func=lambda i: labels[i], key="card_pick")
+    card = cards[idx]
+    cid = card["id"]
+
+    paid = db.card_paid_total(cid)
+    remaining = (card["month_debt"] or 0) - paid
+    m1, m2, m3 = st.columns(3)
+    m1.metric("مديونية الشهر", egp(card["month_debt"]))
+    m2.metric("إجمالي المسدّد", egp(paid))
+    m3.metric("المتبقي", egp(remaining))
+    if card["debt_month"]:
+        st.caption(f"مديونية مسجّلة لشهر: {card['debt_month']}")
+
+    # تحديث مديونية الشهر
+    with st.expander("📝 إدخال / تحديث مديونية الشهر", expanded=False):
+        d1, d2 = st.columns(2)
+        new_debt = _num("مديونية هذا الشهر (ج.م)", card["month_debt"] or 0, key=f"card_debt_{cid}")
+        month_lbl = d2.text_input("الشهر", value=card["debt_month"] or today.strftime("%Y-%m"), key=f"card_month_{cid}")
+        if st.button("💾 حفظ المديونية", key=f"card_savedebt_{cid}"):
+            db.card_set_debt(cid, new_debt, month_lbl.strip())
+            st.cache_data.clear()
+            st.success("✅ تم تحديث المديونية.")
+
+    # إضافة سداد
+    with st.expander("➕ تسجيل سداد", expanded=True):
+        p1, p2 = st.columns(2)
+        pay_date = p1.date_input("تاريخ السداد", value=today, key=f"card_pdate_{cid}")
+        pay_amt = _num("المبلغ المسدّد (ج.م)", 0, key=f"card_pamt_{cid}")
+        pay_notes = p2.text_input("ملاحظة (اختياري)", key=f"card_pnotes_{cid}")
+        if st.button("💾 حفظ السداد", type="primary", key=f"card_psave_{cid}"):
+            if (pay_amt or 0) <= 0:
+                st.error("اكتب مبلغ صحيح.")
+            else:
+                db.card_payment_add(cid, pay_date.isoformat(), pay_amt, pay_notes.strip())
+                st.cache_data.clear()
+                st.success("✅ تم حفظ السداد.")
+
+    # جدول السدادات + تعديل/حذف
+    pays = db.card_payments(cid)
+    if pays:
+        st.markdown("##### سدادات هذا الكارت")
+        rows = [{"التاريخ": p["pay_date"], "المبلغ": egp(p["amount"]), "ملاحظة": p["notes"] or ""} for p in pays]
+        show_df(pd.DataFrame(rows))
+        st.success(f"💳 المديونية المتبقية بعد السداد: **{egp(remaining)}**  (المديونية {egp(card['month_debt'])} − المسدّد {egp(paid)})")
+        st.info(f"💳 مديونية الشهر: {egp(card['month_debt'])}  −  إجمالي المسدّد: {egp(paid)}  =  **المتبقي: {egp(remaining)}**")
+
+        st.markdown("##### ✏️ تعديل / حذف سداد")
+        opts = {f'{p["pay_date"]} — {egp(p["amount"])} #{p["id"]}': p for p in pays}
+        pick = st.selectbox("اختر السداد", list(opts.keys()), key=f"card_paypick_{cid}")
+        chosen_pay = opts[pick]
+        e1, e2 = st.columns(2)
+        ed_date = e1.date_input("التاريخ", value=date.fromisoformat(chosen_pay["pay_date"]), key=f"card_editdate_{cid}")
+        ed_amt = _num("المبلغ", chosen_pay["amount"], key=f"card_editamt_{cid}")
+        ed_notes = st.text_input("ملاحظة", value=chosen_pay["notes"] or "", key=f"card_editnotes_{cid}")
+        b1, b2 = st.columns(2)
+        if b1.button("💾 حفظ التعديل", key=f"card_editsave_{cid}"):
+            db.card_payment_update(chosen_pay["id"], ed_date.isoformat(), ed_amt, ed_notes.strip())
+            st.cache_data.clear()
+            st.success("✅ تم تعديل السداد.")
+        if b2.button("🗑️ حذف السداد", key=f"card_editdel_{cid}"):
+            db.card_payment_delete(chosen_pay["id"])
+            st.cache_data.clear()
+            rerun()
+    else:
+        st.info("لا توجد سدادات لهذا الكارت بعد.")
+
+    st.divider()
+    # حذف الكارت
+    with st.expander("🗑️ حذف هذا الكارت نهائياً"):
+        st.warning("سيتم حذف الكارت وكل سداداته.")
+        if st.button("تأكيد حذف الكارت", key=f"card_delete_{cid}"):
+            db.card_delete(cid)
+            st.cache_data.clear()
+            rerun()
+
+
+def view_ledger():
+    st.header("💰 حسابات شخصية")
+    tab_p, tab_c = st.tabs(["👤 حسابات الأشخاص", "💳 كروت الائتمان"])
+    with tab_p:
+        _render_persons_ledger()
+    with tab_c:
+        _render_cards()
+
+
+def _render_persons_ledger():
+    st.caption("بند لتسجيل فلوس تدفعها لأشخاص وتستردها — مثل شيت إكسل.")
+
+    persons = db.ledger_persons()
+    # اختيار شخص موجود أو إضافة جديد
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        chosen = st.selectbox("اختر شخص", ["— اختر —"] + persons, key="ledger_person_pick")
+    with c2:
+        new_person = st.text_input("أو أضف شخص جديد", key="ledger_new_person")
+
+    person = None
+    if new_person.strip():
+        person = new_person.strip()
+    elif chosen != "— اختر —":
+        person = chosen
+
+    if not person:
+        st.info("اختر شخصاً موجوداً أو اكتب اسم شخص جديد للبدء.")
+        return
+
+    st.subheader(f"حساب: {person}")
+
+    # إضافة حركة جديدة
+    with st.expander("➕ إضافة حركة", expanded=True):
+        d1, d2 = st.columns(2)
+        e_date = d1.date_input("التاريخ", value=date.today(), key="ledger_date")
+        e_desc = d2.text_input("البيان", key="ledger_desc", placeholder="سبب الدفع/الاسترداد")
+        d3, d4 = st.columns(2)
+        with d3:
+            a_out = _num("فلوس دفعتها له (طالعة)", 0, key="ledger_out")
+        with d4:
+            a_in = _num("فلوس استرددتها منه (راجعة)", 0, key="ledger_in")
+        if st.button("💾 حفظ الحركة", type="primary", key="ledger_save"):
+            if (a_out or 0) <= 0 and (a_in or 0) <= 0:
+                st.error("اكتب مبلغ في خانة الطالعة أو الراجعة.")
+            else:
+                db.ledger_add(person, e_date.isoformat(), e_desc.strip(), a_out, a_in)
+                st.cache_data.clear()
+                st.success("✅ تم حفظ الحركة.")
+
+    # جدول الحركات
+    entries = db.ledger_entries(person)
+    if entries:
+        rows = []
+        running = 0.0
+        for e in entries:
+            running += (e["amount_out"] or 0) - (e["amount_in"] or 0)
+            rows.append({
+                "التاريخ": e["entry_date"],
+                "البيان": e["description"] or "",
+                "طالعة (دفعت)": egp(e["amount_out"]) if e["amount_out"] else "",
+                "راجعة (استرد)": egp(e["amount_in"]) if e["amount_in"] else "",
+                "الرصيد الجاري": egp(running),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        s = db.ledger_summary(person)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("إجمالي المدفوع (طالعة)", egp(s["total_out"]))
+        m2.metric("إجمالي المسترد (راجعة)", egp(s["total_in"]))
+        m3.metric("الباقي له عندك", egp(s["balance"]))
+
+        # حذف حركة
+        st.markdown("##### 🗑️ حذف حركة")
+        opts = {f'{e["entry_date"]} — {e["description"] or "بدون بيان"} '
+                f'(طالعة {e["amount_out"]:g} / راجعة {e["amount_in"]:g}) #{e["id"]}': e["id"]
+                for e in entries}
+        pick = st.selectbox("اختر الحركة للحذف", list(opts.keys()), key="ledger_delpick")
+        if st.button("حذف الحركة المختارة", key="ledger_del"):
+            db.ledger_delete(opts[pick])
+            st.success("تم الحذف.")
+            st.cache_data.clear()
+            rerun()
+    else:
+        st.info("لا توجد حركات بعد لهذا الشخص. أضف حركة من الأعلى.")
+
+
+def view_shipping_combined():
+    st.header("🚚 مع شركة الشحن")
+    st.caption("كل القطع اللي حالتها \"مع شركة الشحن\" في الصين وأمريكا مع بعض في مكان واحد.")
+
+    cn_items = db.items_by_status("Out For Delivery")
+    usa_items = db.usa_items_by_status("Out For Delivery")
+
+    if not cn_items and not usa_items:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("قطع الصين", 0)
+        m2.metric("قطع أمريكا", 0)
+        m3.metric("الإجمالي", 0)
+        st.info("لا توجد قطع مع شركة الشحن حالياً.")
+        return
+
+    rows = []
+    total_sales = 0.0
+    total_deposit = 0.0
+    for it in cn_items:
+        sell = it["selling_price_egp"] or 0
+        dep = it["deposit_paid"] or 0
+        total_sales += sell
+        total_deposit += dep
+        rows.append({
+            "المصدر": "🇨🇳 الصين",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(sell),
+            "العربون": egp(dep),
+            "الصافي بعد العربون": egp(sell - dep),
+            "الربح": _china_profit_disp(it),
+        })
+    for it in usa_items:
+        sell = it["selling_price_egp"] or 0
+        dep = it["deposit_paid"] or 0
+        total_sales += sell
+        total_deposit += dep
+        rows.append({
+            "المصدر": "🇺🇸 أمريكا",
+            "أوردر": it["order_number"],
+            "العميل": it["customer_name"],
+            "المنتج": it["product_name"],
+            "سعر البيع": egp(sell),
+            "العربون": egp(dep),
+            "الصافي بعد العربون": egp(sell - dep),
+            "الربح": _usa_profit_disp(it),
+        })
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("قطع الصين", len(cn_items))
+    m2.metric("قطع أمريكا", len(usa_items))
+    m3.metric("الإجمالي", len(cn_items) + len(usa_items))
+
+    m4, m5, m6 = st.columns(3)
+    m4.metric("إجمالي سعر البيع", egp(total_sales))
+    m5.metric("إجمالي العربون المدفوع", egp(total_deposit))
+    m6.metric("الصافي اللي الشركة هتحصّله", egp(total_sales - total_deposit))
+
+    show_df(pd.DataFrame(rows))
+
+
+# ============================================================
+#  التوجيه
+# ============================================================
+view = st.session_state.view
+_show_flash()
+if view == "dashboard":
+    view_dashboard()
+elif view == "orders":
+    view_orders()
+elif view == "order_details":
+    view_order_details()
+elif view == "reports":
+    view_reports()
+elif view == "usa_dashboard":
+    view_usa_dashboard()
+elif view == "usa_orders":
+    view_usa_orders()
+elif view == "usa_order_details":
+    view_usa_order_details()
+elif view == "usa_reports":
+    view_usa_reports()
+elif view == "shipping_combined":
+    view_shipping_combined()
+elif view == "ledger":
+    view_ledger()
