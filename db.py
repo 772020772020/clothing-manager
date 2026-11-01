@@ -5,6 +5,7 @@ db.py
 نفس منطق نسخة SQLite لكن بصيغة PostgreSQL.
 """
 
+from datetime import date as _date
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from calculations import calc_item
@@ -197,27 +198,35 @@ class Database:
         return calc_item(buy_yuan, weight_g, sell, o["purchase_yuan_rate"],
                          o["shipping_yuan_rate"], o["shipping_price_per_kg_yuan"])
 
+    def _delivered_date_for(self, status, given=None, existing=None):
+        """تاريخ التسليم: يتسجل بس لو الحالة 'تم التسليم'، وإلا فاضي."""
+        if status != "Delivered":
+            return None
+        return given or existing or _date.today().isoformat()
+
     def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
                     status="Order Registered", weight_date=None,
-                    ptype="", brand="", color="", gender=""):
+                    ptype="", brand="", color="", gender="", delivered_date=None):
         c = self._compute(oid, buy_yuan, weight_g, sell, weight_date)
+        dd = self._delivered_date_for(status, delivered_date)
         return self._exec(
             """INSERT INTO items (order_id, customer_name, product_name, selling_price_egp,
                purchase_price_yuan, weight_grams, deposit_paid, status,
                purchase_cost_egp, shipping_cost_egp, total_cost_egp, profit_egp, weight_date,
-               product_type, product_brand, product_color, product_gender)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               product_type, product_brand, product_color, product_gender, delivered_date)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date,
-             ptype, brand, color, gender),
+             ptype, brand, color, gender, dd),
             fetch="id")
 
     def update_item(self, iid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
                     status="Order Registered", weight_date=None, new_order_id=None,
-                    ptype=None, brand=None, color=None, gender=None):
+                    ptype=None, brand=None, color=None, gender=None, delivered_date=None):
         it = self.get_item(iid)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
         c = self._compute(target_oid, buy_yuan, weight_g, sell, weight_date)
+        dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
         ptype = it["product_type"] if ptype is None else ptype
         brand = it["product_brand"] if brand is None else brand
         color = it["product_color"] if color is None else color
@@ -226,15 +235,17 @@ class Database:
             """UPDATE items SET order_id=%s, customer_name=%s, product_name=%s, selling_price_egp=%s,
                purchase_price_yuan=%s, weight_grams=%s, deposit_paid=%s, status=%s,
                purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, profit_egp=%s, weight_date=%s,
-               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s
+               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s, delivered_date=%s
                WHERE id=%s""",
             (target_oid, customer, product, sell, buy_yuan, weight_g, deposit, status,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["profit_egp"], weight_date,
-             ptype, brand, color, gender, iid))
+             ptype, brand, color, gender, dd, iid))
 
     def update_item_status(self, iid, status):
         """تحديث حالة القطعة فقط (للوحة المعلومات)."""
-        self._exec("UPDATE items SET status=%s WHERE id=%s", (status, iid))
+        self._exec("""UPDATE items SET status=%s,
+            delivered_date = CASE WHEN %s='Delivered' THEN COALESCE(delivered_date, %s) ELSE NULL END
+            WHERE id=%s""", (status, status, _date.today().isoformat(), iid))
 
     def report_expected_vs_actual(self):
         """مقارنة الربح المتوقع (تقدير 500ج) بالربح الحقيقي للقطع التي وصل وزنها."""
@@ -532,21 +543,20 @@ class Database:
             GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
     def report_monthly(self):
-        return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
+        """أرباح شهرية بتاريخ تسليم القطعة (استلام فلوسها) مش بتاريخ الأوردر."""
+        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
-            FROM orders o LEFT JOIN items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+            FROM items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def report_yearly(self):
-        return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY') period, COUNT(i.id) pieces,
+        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY') period, COUNT(i.id) pieces,
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(CASE WHEN i.weight_grams>0 THEN i.profit_egp ELSE 0 END),0) profit
-            FROM orders o LEFT JOIN items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+            FROM items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def all_items_detailed(self):
@@ -606,6 +616,14 @@ class Database:
         self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_brand TEXT DEFAULT ''")
         self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_color TEXT DEFAULT ''")
         self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_gender TEXT DEFAULT ''")
+        # تاريخ التسليم (استلام فلوس القطعة): الأرباح الشهرية/السنوية بتتحسب بيه
+        self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS delivered_date TEXT")
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS delivered_date TEXT")
+        # القطع المسلّمة قبل التحديث: نفترض تاريخ تسليمها = تاريخ أوردرها (مرة واحدة، وبعدها تقدر تعدله)
+        self._exec("""UPDATE items i SET delivered_date = o.order_date
+            FROM orders o WHERE o.id=i.order_id AND i.status='Delivered' AND i.delivered_date IS NULL""")
+        self._exec("""UPDATE usa_items i SET delivered_date = o.order_date
+            FROM usa_orders o WHERE o.id=i.order_id AND i.status='Delivered' AND i.delivered_date IS NULL""")
         # جدول المصاريف العامة (تخص الصين وأمريكا معاً)
         self._exec("""CREATE TABLE IF NOT EXISTS expenses (
             id SERIAL PRIMARY KEY,
@@ -791,24 +809,26 @@ class Database:
 
     def usa_add_item(self, order_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
                      status="Order Registered", weight_date=None,
-                     ptype="", brand="", color="", gender=""):
+                     ptype="", brand="", color="", gender="", delivered_date=None):
         c = self._usa_compute(order_id, buy_usd, weight_g, sell)
+        dd = self._delivered_date_for(status, delivered_date)
         return self._exec(
             """INSERT INTO usa_items (order_id, customer_name, product_name, purchase_price_usd,
                weight_grams, selling_price_egp, deposit_paid, status, weight_date,
                purchase_cost_egp, shipping_cost_egp, total_cost_egp, cost_egp, profit_egp,
-               product_type, product_brand, product_color, product_gender)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               product_type, product_brand, product_color, product_gender, delivered_date)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (order_id, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], ptype, brand, color, gender), fetch="id")
+             c["profit_egp"], ptype, brand, color, gender, dd), fetch="id")
 
     def usa_update_item(self, item_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
                         status="Order Registered", weight_date=None, new_order_id=None,
-                        ptype=None, brand=None, color=None, gender=None):
+                        ptype=None, brand=None, color=None, gender=None, delivered_date=None):
         it = self.usa_get_item(item_id)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
         c = self._usa_compute(target_oid, buy_usd, weight_g, sell)
+        dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
         ptype = it["product_type"] if ptype is None else ptype
         brand = it["product_brand"] if brand is None else brand
         color = it["product_color"] if color is None else color
@@ -817,17 +837,19 @@ class Database:
             """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, purchase_price_usd=%s,
                weight_grams=%s, selling_price_egp=%s, deposit_paid=%s, status=%s, weight_date=%s,
                purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, cost_egp=%s, profit_egp=%s,
-               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s
+               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s, delivered_date=%s
                WHERE id=%s""",
             (target_oid, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], ptype, brand, color, gender, item_id))
+             c["profit_egp"], ptype, brand, color, gender, dd, item_id))
 
     def usa_delete_item(self, item_id):
         self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
 
     def usa_update_item_status(self, item_id, status):
-        self._exec("UPDATE usa_items SET status=%s WHERE id=%s", (status, item_id))
+        self._exec("""UPDATE usa_items SET status=%s,
+            delivered_date = CASE WHEN %s='Delivered' THEN COALESCE(delivered_date, %s) ELSE NULL END
+            WHERE id=%s""", (status, status, _date.today().isoformat(), item_id))
 
     def usa_items_by_status(self, status):
         """كل قطع أمريكا في حالة معيّنة مع رقم الأوردر والمورد."""
@@ -989,19 +1011,18 @@ class Database:
             GROUP BY customer_name ORDER BY profit DESC""", fetch="all")
 
     def usa_report_monthly(self):
-        return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
+        """أرباح شهرية بتاريخ تسليم القطعة (استلام فلوسها) مش بتاريخ الأوردر."""
+        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY-MM') period, COUNT(i.id) pieces,
             COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
-            FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+            FROM usa_items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
             GROUP BY period ORDER BY period DESC""", fetch="all")
 
     def usa_report_yearly(self):
-        return self._exec("""SELECT TO_CHAR(o.order_date::date,'YYYY') period, COUNT(i.id) pieces,
+        return self._exec("""SELECT TO_CHAR(i.delivered_date::date,'YYYY') period, COUNT(i.id) pieces,
             COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.total_cost_egp ELSE 0 END),0) cost,
             COALESCE(SUM(i.selling_price_egp),0) sales,
             COALESCE(SUM(CASE WHEN i.profit_egp IS NOT NULL THEN i.profit_egp ELSE 0 END),0) profit
-            FROM usa_orders o LEFT JOIN usa_items i ON i.order_id=o.id
-                AND i.status NOT IN ('Out of Stock','Cancelled','Ready For Sale','Out For Fitting')
+            FROM usa_items i WHERE i.status='Delivered' AND i.delivered_date IS NOT NULL
             GROUP BY period ORDER BY period DESC""", fetch="all")
