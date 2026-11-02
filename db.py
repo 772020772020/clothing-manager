@@ -617,6 +617,11 @@ class Database:
         self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_color TEXT DEFAULT ''")
         self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS product_gender TEXT DEFAULT ''")
         # تاريخ التسليم (استلام فلوس القطعة): الأرباح الشهرية/السنوية بتتحسب بيه
+        # طريقة حساب قطعة أمريكا: calc = بالدولار والوزن وسعر الكيلو، manual = تكلفة جاهزة وسعر بيع (نظام الوسيط)
+        self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS cost_mode TEXT")
+        self._exec("""UPDATE usa_items SET cost_mode = CASE
+            WHEN COALESCE(purchase_price_usd,0)=0 AND COALESCE(weight_grams,0)=0 AND profit_egp IS NOT NULL
+            THEN 'manual' ELSE 'calc' END WHERE cost_mode IS NULL""")
         self._exec("ALTER TABLE items ADD COLUMN IF NOT EXISTS delivered_date TEXT")
         self._exec("ALTER TABLE usa_items ADD COLUMN IF NOT EXISTS delivered_date TEXT")
         # القطع المسلّمة قبل التحديث: نفترض تاريخ تسليمها = تاريخ أوردرها (مرة واحدة، وبعدها تقدر تعدله)
@@ -807,27 +812,38 @@ class Database:
         return calc_item(buy_usd, weight_g, sell, o["purchase_usd_rate"],
                          o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
 
+    def _usa_calc_or_manual(self, oid, mode, buy_usd, weight_g, sell, manual_cost):
+        """calc: بالدولار والوزن. manual: تكلفة جاهزة، الربح = البيع − التكلفة على طول."""
+        if mode == "manual":
+            cost = float(manual_cost or 0)
+            return {"purchase_cost_egp": round(cost, 2), "shipping_cost_egp": 0,
+                    "total_cost_egp": round(cost, 2),
+                    "profit_egp": round(float(sell or 0) - cost, 2), "has_weight": False}
+        return self._usa_compute(oid, buy_usd, weight_g, sell)
+
     def usa_add_item(self, order_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
                      status="Order Registered", weight_date=None,
-                     ptype="", brand="", color="", gender="", delivered_date=None):
-        c = self._usa_compute(order_id, buy_usd, weight_g, sell)
+                     ptype="", brand="", color="", gender="", delivered_date=None,
+                     cost_mode="calc", manual_cost=0):
+        c = self._usa_calc_or_manual(order_id, cost_mode, buy_usd, weight_g, sell, manual_cost)
         dd = self._delivered_date_for(status, delivered_date)
         return self._exec(
             """INSERT INTO usa_items (order_id, customer_name, product_name, purchase_price_usd,
                weight_grams, selling_price_egp, deposit_paid, status, weight_date,
                purchase_cost_egp, shipping_cost_egp, total_cost_egp, cost_egp, profit_egp,
-               product_type, product_brand, product_color, product_gender, delivered_date)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               product_type, product_brand, product_color, product_gender, delivered_date, cost_mode)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (order_id, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], ptype, brand, color, gender, dd), fetch="id")
+             c["profit_egp"], ptype, brand, color, gender, dd, cost_mode), fetch="id")
 
     def usa_update_item(self, item_id, customer, product, buy_usd, sell, weight_g=0, deposit=0,
                         status="Order Registered", weight_date=None, new_order_id=None,
-                        ptype=None, brand=None, color=None, gender=None, delivered_date=None):
+                        ptype=None, brand=None, color=None, gender=None, delivered_date=None,
+                        cost_mode="calc", manual_cost=0):
         it = self.usa_get_item(item_id)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
-        c = self._usa_compute(target_oid, buy_usd, weight_g, sell)
+        c = self._usa_calc_or_manual(target_oid, cost_mode, buy_usd, weight_g, sell, manual_cost)
         dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
         ptype = it["product_type"] if ptype is None else ptype
         brand = it["product_brand"] if brand is None else brand
@@ -837,11 +853,12 @@ class Database:
             """UPDATE usa_items SET order_id=%s, customer_name=%s, product_name=%s, purchase_price_usd=%s,
                weight_grams=%s, selling_price_egp=%s, deposit_paid=%s, status=%s, weight_date=%s,
                purchase_cost_egp=%s, shipping_cost_egp=%s, total_cost_egp=%s, cost_egp=%s, profit_egp=%s,
-               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s, delivered_date=%s
+               product_type=%s, product_brand=%s, product_color=%s, product_gender=%s, delivered_date=%s,
+               cost_mode=%s
                WHERE id=%s""",
             (target_oid, customer, product, buy_usd, weight_g, sell, deposit, status, weight_date,
              c["purchase_cost_egp"], c["shipping_cost_egp"], c["total_cost_egp"], c["total_cost_egp"],
-             c["profit_egp"], ptype, brand, color, gender, dd, item_id))
+             c["profit_egp"], ptype, brand, color, gender, dd, cost_mode, item_id))
 
     def usa_delete_item(self, item_id):
         self._exec("DELETE FROM usa_items WHERE id=%s", (item_id,))
@@ -874,6 +891,8 @@ class Database:
         if not o:
             return
         for it in self.usa_items_of(oid):
+            if (it.get("cost_mode") or "calc") == "manual":
+                continue  # تكلفة جاهزة: مش بتتأثر بأسعار الأوردر
             c = calc_item(it["purchase_price_usd"], it["weight_grams"], it["selling_price_egp"],
                           o["purchase_usd_rate"], o["shipping_usd_rate"], o["shipping_price_per_kg_usd"])
             self._exec(
