@@ -594,6 +594,7 @@ def _render_product_search():
         })
     if rows:
         show_df(pd.DataFrame(rows))
+        _edit_picker(cn, usa, "psearch")
     else:
         st.info("لا توجد قطع مطابقة.")
 
@@ -644,6 +645,291 @@ def _panel(label):
     if hasattr(st, "popover"):
         return st.popover(label, use_container_width=True)
     return st.expander(label, expanded=False)
+
+
+# ============================================================
+#  نماذج تعديل القطع (متعرّفة هنا عشان البحث العلوي يقدر يناديها)
+# ============================================================
+
+def _num(label, value, key):
+    """حقل رقمي يظهر فاضي بدل 0.00 (نص يتحوّل لرقم)."""
+    txt = st.text_input(label, value=("" if (value in (None, 0, 0.0)) else _fmt_plain(value)), key=key)
+    txt = (txt or "").strip().replace(",", "")
+    if txt == "":
+        return 0.0
+    try:
+        return float(txt)
+    except ValueError:
+        return 0.0
+
+
+def _fmt_plain(v):
+    f = float(v)
+    return str(int(f)) if f == int(f) else str(f)
+
+
+def _item_form(oid, item, form_key):
+    """نموذج إضافة/تعديل قطعة مع معاينة حية."""
+    order = db.get_order(oid)
+    is_edit = item is not None
+    k = form_key  # بادئة فريدة للحقول
+
+    # نستخدم st.form: التعديلات لا تُعيد تحميل الصفحة، والحساب/الحفظ يتم مرة واحدة عند الضغط
+    _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
+    with _form_ctx:
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.customers_list(), key=f"{k}_cust", in_form=True)
+        st.markdown("**تفاصيل المنتج**")
+        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
+        ptype, brand, color, gender = _product_picker(k, current=cur)
+        if is_edit and not any(cur):
+            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
+        c3, c4, c5 = st.columns(3)
+        with c3:
+            sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+        with c4:
+            buy_yuan = _num("سعر الشراء باليوان", item["purchase_price_yuan"] if is_edit else 0, key=f"{k}_buy")
+        with c5:
+            weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
+        c6, c7 = st.columns(2)
+        with c6:
+            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+        status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
+        cur_status_ar = STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
+        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
+        status_en = ITEM_STATUSES[status_ar_list.index(status_ar)]
+
+        # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
+        new_order_id = None
+        if is_edit:
+            all_ords = db.all_orders()
+            ord_ids = [o["id"] for o in all_ords]
+            ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
+            cur_oid = item["order_id"]
+            cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
+            picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
+                                        index=cur_idx, key=f"{k}_ord")
+            new_order_id = ord_ids[ord_labels.index(picked_label)]
+
+        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
+        weight_date = None
+        if weight > 0:
+            existing = None
+            if is_edit and item.get("weight_date"):
+                try:
+                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    existing = date.today()
+            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
+            weight_date = wd.isoformat()
+
+        # معاينة الحساب — سعر الشحن بييجي من شحنة يوم الوزن لو مسجّلة، وإلا من سعر الأوردر مؤقتاً
+        sh = db.get_shipment(weight_date) if weight_date else None
+        ship_rate = sh["shipping_yuan_rate"] if sh else order["shipping_yuan_rate"]
+        ship_kg = sh["shipping_price_per_kg_yuan"] if sh else order["shipping_price_per_kg_yuan"]
+        c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"], ship_rate, ship_kg)
+        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
+        st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
+                   f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+        if weight_date and not sh:
+            st.caption("⚠️ لسه مفيش سعر شحنة مسجّل لليوم ده — المعاينة بسعر شحن الأوردر مؤقتاً. "
+                      "سجّل سعر الشحنة من تقارير الصين ⟵ تاب \"الواصل في يوم\".")
+
+        # تاريخ التسليم (استلام فلوس القطعة): بيتسجل لما الحالة تبقى "تم التسليم"، والأرباح الشهرية بتتحسب بيه
+        _dd_existing = date.today()
+        if is_edit and item.get("delivered_date"):
+            try:
+                _dd_existing = datetime.strptime(item["delivered_date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                _dd_existing = date.today()
+        delivered_dt = st.date_input("تاريخ التسليم (بيُستخدم لما الحالة تبقى \"تم التسليم\")",
+                                     value=_dd_existing, key=f"{k}_deliv")
+        delivered_date = delivered_dt.isoformat()
+
+        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
+        submitted = st.form_submit_button(label, type="primary")
+
+    if submitted:
+        composed = _compose_product_name(ptype, brand, color, gender)
+        product = composed if composed else (item["product_name"] if is_edit else "")
+        if not customer.strip() or not product.strip():
+            st.error("اكتب اسم العميل واختر تفاصيل المنتج (النوع على الأقل).")
+        else:
+            if is_edit:
+                db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
+                               weight, deposit, status_en, weight_date, new_order_id=new_order_id,
+                               ptype=ptype, brand=brand, color=color, gender=gender,
+                               delivered_date=delivered_date)
+                moved = new_order_id is not None and new_order_id != item["order_id"]
+                st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
+            else:
+                db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
+                               weight, deposit, status_en, weight_date,
+                               ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "",
+                               delivered_date=delivered_date)
+                st.success("✅ تم إضافة القطعة.")
+            st.cache_data.clear()
+            rerun()
+
+
+
+def _usa_item_form(oid, item, form_key):
+    """نموذج إضافة/تعديل قطعة أمريكا (نفس منطق الصين بالظبط: سعر بالدولار + وزن + شحن)."""
+    order = db.usa_get_order(oid)
+    is_edit = item is not None
+    k = form_key
+
+    # طريقة الحساب برّه الفورم عشان الخانات تتغيّر فوراً لما تختار
+    _mode_labels = {"calc": "💵 بالدولار والوزن وسعر الكيلو", "manual": "🧾 تكلفة جاهزة وسعر بيع (نظام الوسيط)"}
+    _cur_mode = (item.get("cost_mode") or "calc") if is_edit else "calc"
+    mode = st.radio("طريقة الحساب", list(_mode_labels), format_func=lambda m: _mode_labels[m],
+                    index=list(_mode_labels).index(_cur_mode) if _cur_mode in _mode_labels else 0,
+                    horizontal=True, key=f"{k}_mode")
+    manual = mode == "manual"
+
+    _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
+    with _form_ctx:
+        customer = _customer_name_input("اسم العميل",
+                                        item["customer_name"] if is_edit else "",
+                                        db.usa_customers_list(), key=f"{k}_cust", in_form=True)
+        st.markdown("**تفاصيل المنتج**")
+        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
+        ptype, brand, color, gender = _product_picker(k, current=cur)
+        if is_edit and not any(cur):
+            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
+        manual_cost = 0
+        if manual:
+            c3, c4 = st.columns(2)
+            with c3:
+                sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+            with c4:
+                manual_cost = _num("سعر التكلفة (ج.م)",
+                                   item["cost_egp"] if (is_edit and _cur_mode == "manual") else 0,
+                                   key=f"{k}_mcost")
+            buy_usd = 0
+            weight = 0
+        else:
+            c3, c4, c5 = st.columns(3)
+            with c3:
+                sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
+            with c4:
+                buy_usd = _num("سعر الشراء بالدولار", item["purchase_price_usd"] if is_edit else 0, key=f"{k}_buy")
+            with c5:
+                weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
+        c6, c7 = st.columns(2)
+        with c6:
+            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
+        status_ar_list = [USA_STATUS_AR[s] for s in USA_STATUSES]
+        cur_status_ar = USA_STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
+        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
+        status_en = USA_STATUSES[status_ar_list.index(status_ar)]
+
+        # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
+        new_order_id = None
+        if is_edit:
+            all_ords = db.usa_all_orders()
+            ord_ids = [o["id"] for o in all_ords]
+            ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
+            cur_oid = item["order_id"]
+            cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
+            picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
+                                        index=cur_idx, key=f"{k}_ord")
+            new_order_id = ord_ids[ord_labels.index(picked_label)]
+
+        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
+        weight_date = None
+        if weight > 0:
+            existing = None
+            if is_edit and item.get("weight_date"):
+                try:
+                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    existing = date.today()
+            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
+            weight_date = wd.isoformat()
+
+        # معاينة الحساب
+        if manual:
+            c = {"purchase_cost_egp": manual_cost, "shipping_cost_egp": 0,
+                 "total_cost_egp": manual_cost, "profit_egp": (sell or 0) - (manual_cost or 0)}
+        else:
+            c = calc_item(buy_usd, weight, sell, order["purchase_usd_rate"],
+                          order["shipping_usd_rate"], order["shipping_price_per_kg_usd"])
+        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
+        if status_en == "Ready For Sale":
+            st.caption("🏷️ فوري (للبيع): مش محسوب في الأرباح ولا الخسائر لحد ما يتباع.")
+        else:
+            st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
+                       f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
+
+        # تاريخ التسليم (استلام فلوس القطعة): بيتسجل لما الحالة تبقى "تم التسليم"، والأرباح الشهرية بتتحسب بيه
+        _dd_existing = date.today()
+        if is_edit and item.get("delivered_date"):
+            try:
+                _dd_existing = datetime.strptime(item["delivered_date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                _dd_existing = date.today()
+        delivered_dt = st.date_input("تاريخ التسليم (بيُستخدم لما الحالة تبقى \"تم التسليم\")",
+                                     value=_dd_existing, key=f"{k}_deliv")
+        delivered_date = delivered_dt.isoformat()
+
+        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
+        submitted = st.form_submit_button(label, type="primary")
+
+    if submitted:
+        composed = _compose_product_name(ptype, brand, color, gender)
+        product = composed if composed else (item["product_name"] if is_edit else "")
+        if not customer.strip() and not product.strip():
+            st.error("اكتب اسم العميل أو اختر تفاصيل المنتج على الأقل.")
+        else:
+            if is_edit:
+                db.usa_update_item(item["id"], customer.strip(), product.strip(), buy_usd, sell,
+                                   weight, deposit, status_en, weight_date, new_order_id=new_order_id,
+                                   ptype=ptype, brand=brand, color=color, gender=gender,
+                               delivered_date=delivered_date, cost_mode=mode, manual_cost=manual_cost)
+                moved = new_order_id is not None and new_order_id != item["order_id"]
+                st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
+            else:
+                db.usa_add_item(oid, customer.strip(), product.strip(), buy_usd, sell,
+                                weight, deposit, status_en, weight_date,
+                                ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "",
+                               delivered_date=delivered_date, cost_mode=mode, manual_cost=manual_cost)
+                st.success("✅ تم إضافة القطعة.")
+            st.cache_data.clear()
+            rerun()
+
+
+
+def _edit_picker(cn_items, usa_items, key_prefix):
+    """اختيار قطعة (صين/أمريكا) من نتائج عرض + فتح نموذج التعديل الكامل بتاعها."""
+    opts = {}
+    for it in cn_items:
+        label = (f'🇨🇳 أوردر {it["order_number"]} — {it["customer_name"]} — '
+                 f'{it["product_name"]} (#{it["id"]})')
+        opts[label] = ("cn", it["id"])
+    for it in usa_items:
+        label = (f'🇺🇸 أوردر {it["order_number"]} — {it["customer_name"]} — '
+                 f'{it["product_name"]} (#{it["id"]})')
+        opts[label] = ("usa", it["id"])
+    if not opts:
+        return
+    st.markdown("##### ✏️ تعديل قطعة")
+    pick = st.selectbox("اختر القطعة", list(opts.keys()), index=None,
+                        placeholder="اختر قطعة لتعديلها...", key=f"{key_prefix}_editpick")
+    if not pick:
+        return
+    src, iid = opts[pick]
+    if src == "cn":
+        chosen = db.get_item(iid)
+        if chosen:
+            with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+                _item_form(chosen["order_id"], item=chosen, form_key=f"{key_prefix}_cn_edit_{iid}")
+    else:
+        chosen = db.usa_get_item(iid)
+        if chosen:
+            with st.expander("✏️ تعديل القطعة المختارة (كل التفاصيل)", expanded=True):
+                _usa_item_form(chosen["order_id"], item=chosen, form_key=f"{key_prefix}_usa_edit_{iid}")
 
 
 # ============================================================
@@ -1106,129 +1392,6 @@ def view_order_details():
             rerun()
 
 
-def _num(label, value, key):
-    """حقل رقمي يظهر فاضي بدل 0.00 (نص يتحوّل لرقم)."""
-    txt = st.text_input(label, value=("" if (value in (None, 0, 0.0)) else _fmt_plain(value)), key=key)
-    txt = (txt or "").strip().replace(",", "")
-    if txt == "":
-        return 0.0
-    try:
-        return float(txt)
-    except ValueError:
-        return 0.0
-
-
-def _fmt_plain(v):
-    f = float(v)
-    return str(int(f)) if f == int(f) else str(f)
-
-
-def _item_form(oid, item, form_key):
-    """نموذج إضافة/تعديل قطعة مع معاينة حية."""
-    order = db.get_order(oid)
-    is_edit = item is not None
-    k = form_key  # بادئة فريدة للحقول
-
-    # نستخدم st.form: التعديلات لا تُعيد تحميل الصفحة، والحساب/الحفظ يتم مرة واحدة عند الضغط
-    _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
-    with _form_ctx:
-        customer = _customer_name_input("اسم العميل",
-                                        item["customer_name"] if is_edit else "",
-                                        db.customers_list(), key=f"{k}_cust", in_form=True)
-        st.markdown("**تفاصيل المنتج**")
-        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
-        ptype, brand, color, gender = _product_picker(k, current=cur)
-        if is_edit and not any(cur):
-            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
-        c3, c4, c5 = st.columns(3)
-        with c3:
-            sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
-        with c4:
-            buy_yuan = _num("سعر الشراء باليوان", item["purchase_price_yuan"] if is_edit else 0, key=f"{k}_buy")
-        with c5:
-            weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
-        c6, c7 = st.columns(2)
-        with c6:
-            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
-        status_ar_list = [STATUS_AR[s] for s in ITEM_STATUSES]
-        cur_status_ar = STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
-        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
-        status_en = ITEM_STATUSES[status_ar_list.index(status_ar)]
-
-        # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
-        new_order_id = None
-        if is_edit:
-            all_ords = db.all_orders()
-            ord_ids = [o["id"] for o in all_ords]
-            ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
-            cur_oid = item["order_id"]
-            cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
-            picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
-                                        index=cur_idx, key=f"{k}_ord")
-            new_order_id = ord_ids[ord_labels.index(picked_label)]
-
-        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
-        weight_date = None
-        if weight > 0:
-            existing = None
-            if is_edit and item.get("weight_date"):
-                try:
-                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
-                except (ValueError, TypeError):
-                    existing = date.today()
-            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
-            weight_date = wd.isoformat()
-
-        # معاينة الحساب — سعر الشحن بييجي من شحنة يوم الوزن لو مسجّلة، وإلا من سعر الأوردر مؤقتاً
-        sh = db.get_shipment(weight_date) if weight_date else None
-        ship_rate = sh["shipping_yuan_rate"] if sh else order["shipping_yuan_rate"]
-        ship_kg = sh["shipping_price_per_kg_yuan"] if sh else order["shipping_price_per_kg_yuan"]
-        c = calc_item(buy_yuan, weight, sell, order["purchase_yuan_rate"], ship_rate, ship_kg)
-        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
-        st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
-                   f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
-        if weight_date and not sh:
-            st.caption("⚠️ لسه مفيش سعر شحنة مسجّل لليوم ده — المعاينة بسعر شحن الأوردر مؤقتاً. "
-                      "سجّل سعر الشحنة من تقارير الصين ⟵ تاب \"الواصل في يوم\".")
-
-        # تاريخ التسليم (استلام فلوس القطعة): بيتسجل لما الحالة تبقى "تم التسليم"، والأرباح الشهرية بتتحسب بيه
-        _dd_existing = date.today()
-        if is_edit and item.get("delivered_date"):
-            try:
-                _dd_existing = datetime.strptime(item["delivered_date"], "%Y-%m-%d").date()
-            except (ValueError, TypeError):
-                _dd_existing = date.today()
-        delivered_dt = st.date_input("تاريخ التسليم (بيُستخدم لما الحالة تبقى \"تم التسليم\")",
-                                     value=_dd_existing, key=f"{k}_deliv")
-        delivered_date = delivered_dt.isoformat()
-
-        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
-        submitted = st.form_submit_button(label, type="primary")
-
-    if submitted:
-        composed = _compose_product_name(ptype, brand, color, gender)
-        product = composed if composed else (item["product_name"] if is_edit else "")
-        if not customer.strip() or not product.strip():
-            st.error("اكتب اسم العميل واختر تفاصيل المنتج (النوع على الأقل).")
-        else:
-            if is_edit:
-                db.update_item(item["id"], customer.strip(), product.strip(), sell, buy_yuan,
-                               weight, deposit, status_en, weight_date, new_order_id=new_order_id,
-                               ptype=ptype, brand=brand, color=color, gender=gender,
-                               delivered_date=delivered_date)
-                moved = new_order_id is not None and new_order_id != item["order_id"]
-                st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
-            else:
-                db.create_item(oid, customer.strip(), product.strip(), sell, buy_yuan,
-                               weight, deposit, status_en, weight_date,
-                               ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "",
-                               delivered_date=delivered_date)
-                st.success("✅ تم إضافة القطعة.")
-            st.cache_data.clear()
-            rerun()
-
-
-
 # ============================================================
 #  التقارير + تصدير Excel
 # ============================================================
@@ -1511,132 +1674,6 @@ def _build_backup():
 # ============================================================
 #  نظام أمريكا (واجهات منفصلة)
 # ============================================================
-def _usa_item_form(oid, item, form_key):
-    """نموذج إضافة/تعديل قطعة أمريكا (نفس منطق الصين بالظبط: سعر بالدولار + وزن + شحن)."""
-    order = db.usa_get_order(oid)
-    is_edit = item is not None
-    k = form_key
-
-    # طريقة الحساب برّه الفورم عشان الخانات تتغيّر فوراً لما تختار
-    _mode_labels = {"calc": "💵 بالدولار والوزن وسعر الكيلو", "manual": "🧾 تكلفة جاهزة وسعر بيع (نظام الوسيط)"}
-    _cur_mode = (item.get("cost_mode") or "calc") if is_edit else "calc"
-    mode = st.radio("طريقة الحساب", list(_mode_labels), format_func=lambda m: _mode_labels[m],
-                    index=list(_mode_labels).index(_cur_mode) if _cur_mode in _mode_labels else 0,
-                    horizontal=True, key=f"{k}_mode")
-    manual = mode == "manual"
-
-    _form_ctx = st.form(key=f"{k}_form", clear_on_submit=False)
-    with _form_ctx:
-        customer = _customer_name_input("اسم العميل",
-                                        item["customer_name"] if is_edit else "",
-                                        db.usa_customers_list(), key=f"{k}_cust", in_form=True)
-        st.markdown("**تفاصيل المنتج**")
-        cur = (item["product_type"], item["product_brand"], item["product_color"], item["product_gender"]) if is_edit else None
-        ptype, brand, color, gender = _product_picker(k, current=cur)
-        if is_edit and not any(cur):
-            st.caption(f"الاسم الحالي: {item['product_name']} (قطعة قديمة بدون تصنيف — اختر لو عايز تضيفه)")
-        manual_cost = 0
-        if manual:
-            c3, c4 = st.columns(2)
-            with c3:
-                sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
-            with c4:
-                manual_cost = _num("سعر التكلفة (ج.م)",
-                                   item["cost_egp"] if (is_edit and _cur_mode == "manual") else 0,
-                                   key=f"{k}_mcost")
-            buy_usd = 0
-            weight = 0
-        else:
-            c3, c4, c5 = st.columns(3)
-            with c3:
-                sell = _num("سعر البيع بالمصري", item["selling_price_egp"] if is_edit else 0, key=f"{k}_sell")
-            with c4:
-                buy_usd = _num("سعر الشراء بالدولار", item["purchase_price_usd"] if is_edit else 0, key=f"{k}_buy")
-            with c5:
-                weight = _num("الوزن بالجرام", item["weight_grams"] if is_edit else 0, key=f"{k}_wt")
-        c6, c7 = st.columns(2)
-        with c6:
-            deposit = _num("العربون المدفوع", item["deposit_paid"] if is_edit else 0, key=f"{k}_dep")
-        status_ar_list = [USA_STATUS_AR[s] for s in USA_STATUSES]
-        cur_status_ar = USA_STATUS_AR.get(item["status"], status_ar_list[0]) if is_edit else status_ar_list[0]
-        status_ar = c7.selectbox("الحالة", status_ar_list, index=status_ar_list.index(cur_status_ar), key=f"{k}_st")
-        status_en = USA_STATUSES[status_ar_list.index(status_ar)]
-
-        # نقل القطعة لأوردر آخر (اختياري) — عند التعديل فقط
-        new_order_id = None
-        if is_edit:
-            all_ords = db.usa_all_orders()
-            ord_ids = [o["id"] for o in all_ords]
-            ord_labels = [f'أوردر {o["order_number"]} ({o["order_date"]})' for o in all_ords]
-            cur_oid = item["order_id"]
-            cur_idx = ord_ids.index(cur_oid) if cur_oid in ord_ids else 0
-            picked_label = st.selectbox("📦 الأوردر التابعة له القطعة (غيّره لنقلها)", ord_labels,
-                                        index=cur_idx, key=f"{k}_ord")
-            new_order_id = ord_ids[ord_labels.index(picked_label)]
-
-        # تاريخ تسجيل الوزن (يظهر فقط لو فيه وزن) — يمكن تعديله يدوياً
-        weight_date = None
-        if weight > 0:
-            existing = None
-            if is_edit and item.get("weight_date"):
-                try:
-                    existing = datetime.strptime(item["weight_date"], "%Y-%m-%d").date()
-                except (ValueError, TypeError):
-                    existing = date.today()
-            wd = st.date_input("تاريخ وصول/تسجيل الوزن", value=existing or date.today(), key=f"{k}_wd")
-            weight_date = wd.isoformat()
-
-        # معاينة الحساب
-        if manual:
-            c = {"purchase_cost_egp": manual_cost, "shipping_cost_egp": 0,
-                 "total_cost_egp": manual_cost, "profit_egp": (sell or 0) - (manual_cost or 0)}
-        else:
-            c = calc_item(buy_usd, weight, sell, order["purchase_usd_rate"],
-                          order["shipping_usd_rate"], order["shipping_price_per_kg_usd"])
-        prof = "⏳ بانتظار إدخال الوزن" if c["profit_egp"] is None else egp(c["profit_egp"])
-        if status_en == "Ready For Sale":
-            st.caption("🏷️ فوري (للبيع): مش محسوب في الأرباح ولا الخسائر لحد ما يتباع.")
-        else:
-            st.caption(f"تكلفة الشراء: {egp(c['purchase_cost_egp'])} | تكلفة الشحن: {egp(c['shipping_cost_egp'])} | "
-                       f"إجمالي التكلفة: {egp(c['total_cost_egp'])} | الربح: {prof}")
-
-        # تاريخ التسليم (استلام فلوس القطعة): بيتسجل لما الحالة تبقى "تم التسليم"، والأرباح الشهرية بتتحسب بيه
-        _dd_existing = date.today()
-        if is_edit and item.get("delivered_date"):
-            try:
-                _dd_existing = datetime.strptime(item["delivered_date"], "%Y-%m-%d").date()
-            except (ValueError, TypeError):
-                _dd_existing = date.today()
-        delivered_dt = st.date_input("تاريخ التسليم (بيُستخدم لما الحالة تبقى \"تم التسليم\")",
-                                     value=_dd_existing, key=f"{k}_deliv")
-        delivered_date = delivered_dt.isoformat()
-
-        label = "💾 حفظ التعديل" if is_edit else "➕ إضافة القطعة"
-        submitted = st.form_submit_button(label, type="primary")
-
-    if submitted:
-        composed = _compose_product_name(ptype, brand, color, gender)
-        product = composed if composed else (item["product_name"] if is_edit else "")
-        if not customer.strip() and not product.strip():
-            st.error("اكتب اسم العميل أو اختر تفاصيل المنتج على الأقل.")
-        else:
-            if is_edit:
-                db.usa_update_item(item["id"], customer.strip(), product.strip(), buy_usd, sell,
-                                   weight, deposit, status_en, weight_date, new_order_id=new_order_id,
-                                   ptype=ptype, brand=brand, color=color, gender=gender,
-                               delivered_date=delivered_date, cost_mode=mode, manual_cost=manual_cost)
-                moved = new_order_id is not None and new_order_id != item["order_id"]
-                st.success("✅ تم نقل القطعة وتعديلها." if moved else "✅ تم تعديل القطعة.")
-            else:
-                db.usa_add_item(oid, customer.strip(), product.strip(), buy_usd, sell,
-                                weight, deposit, status_en, weight_date,
-                                ptype=ptype or "", brand=brand or "", color=color or "", gender=gender or "",
-                               delivered_date=delivered_date, cost_mode=mode, manual_cost=manual_cost)
-                st.success("✅ تم إضافة القطعة.")
-            st.cache_data.clear()
-            rerun()
-
-
 def view_usa_dashboard():
     st.header("📊 لوحة معلومات أمريكا")
     d = db.usa_dashboard()
@@ -2343,6 +2380,7 @@ def view_shipping_combined():
     m6.metric("الصافي اللي الشركة هتحصّله", egp(total_sales - total_deposit))
 
     show_df(pd.DataFrame(rows))
+    _edit_picker(cn_items, usa_items, "ship")
 
 
 # ============================================================
