@@ -10,6 +10,20 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from calculations import calc_item
 
+def auto_status(status, price, weight_g, prev_status=None):
+    """تحويل تلقائي للحالة:
+    تم التسجيل + سعر شراء > 0  ->  في الطريق
+    في الطريق + وزن > 0        ->  في المستودع
+    prev_status: لو اتبعت (تعديل) ومحمود غيّر الحالة بإيده (status != prev_status) منغيّرهاش."""
+    if prev_status is not None and status != prev_status:
+        return status
+    if status == "Order Registered" and float(price or 0) > 0:
+        status = "In Transit"
+    if status == "In Transit" and float(weight_g or 0) > 0:
+        status = "In Warehouse"
+    return status
+
+
 ITEM_STATUSES = [
     "Order Registered", "In Transit",
     "Awaiting Weight", "In Warehouse", "Out For Delivery",
@@ -207,6 +221,7 @@ class Database:
     def create_item(self, oid, customer, product, sell, buy_yuan, weight_g=0, deposit=0,
                     status="Order Registered", weight_date=None,
                     ptype="", brand="", color="", gender="", delivered_date=None):
+        status = auto_status(status, buy_yuan, weight_g)
         c = self._compute(oid, buy_yuan, weight_g, sell, weight_date)
         dd = self._delivered_date_for(status, delivered_date)
         return self._exec(
@@ -225,6 +240,7 @@ class Database:
                     ptype=None, brand=None, color=None, gender=None, delivered_date=None):
         it = self.get_item(iid)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
+        status = auto_status(status, buy_yuan, weight_g, prev_status=it["status"])
         c = self._compute(target_oid, buy_yuan, weight_g, sell, weight_date)
         dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
         ptype = it["product_type"] if ptype is None else ptype
@@ -825,6 +841,8 @@ class Database:
                      status="Order Registered", weight_date=None,
                      ptype="", brand="", color="", gender="", delivered_date=None,
                      cost_mode="calc", manual_cost=0):
+        if cost_mode != "manual":
+            status = auto_status(status, buy_usd, weight_g)
         c = self._usa_calc_or_manual(order_id, cost_mode, buy_usd, weight_g, sell, manual_cost)
         dd = self._delivered_date_for(status, delivered_date)
         return self._exec(
@@ -843,6 +861,8 @@ class Database:
                         cost_mode="calc", manual_cost=0):
         it = self.usa_get_item(item_id)
         target_oid = new_order_id if new_order_id is not None else it["order_id"]
+        if cost_mode != "manual":
+            status = auto_status(status, buy_usd, weight_g, prev_status=it["status"])
         c = self._usa_calc_or_manual(target_oid, cost_mode, buy_usd, weight_g, sell, manual_cost)
         dd = self._delivered_date_for(status, delivered_date, it.get("delivered_date"))
         ptype = it["product_type"] if ptype is None else ptype
